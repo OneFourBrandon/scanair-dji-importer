@@ -49,7 +49,7 @@ C:\Python314\python.exe -m pip install tkinterdnd2
 
 ## Website handoff contract
 
-The creator can later send files without modifying this app by using:
+You can send KMZ files to this app by using:
 
 ```http
 POST http://127.0.0.1:8765/import
