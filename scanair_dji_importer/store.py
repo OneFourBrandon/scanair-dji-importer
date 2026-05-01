@@ -164,6 +164,7 @@ class ProjectStore:
         source_paths: Iterable[Path],
         project_name: str | None = None,
         replace: bool = False,
+        replace_existing_name: bool = True,
     ) -> list[StoredFile]:
         target_name = project_name or self.get_active_project_name()
         if not target_name:
@@ -179,8 +180,11 @@ class ProjectStore:
         imported = []
         for source_path in source_paths:
             safe_name = sanitize_filename(source_path.name)
-            target = unique_target(files_dir / safe_name)
-            shutil.copy2(source_path, target)
+            target = files_dir / safe_name
+            if not replace_existing_name:
+                target = unique_target(target)
+            if source_path.resolve() != target.resolve():
+                shutil.copy2(source_path, target)
             imported.append(self.get_file(target_name, target.name))
         return imported
 

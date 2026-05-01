@@ -45,6 +45,32 @@ class ProjectStoreTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_add_files_replaces_matching_project_filename(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-replace-filename"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            store.create_project("Roof A")
+            store.set_active_project("Roof A")
+
+            source_dir = root / "incoming"
+            source_dir.mkdir()
+            source = source_dir / "mission.kmz"
+            source.write_bytes(b"old-kmz")
+            store.add_files([source])
+
+            source.write_bytes(b"updated-kmz")
+            imported = store.add_files([source])
+
+            project = store.get_project("Roof A")
+            self.assertEqual([file.name for file in project.files], ["mission.kmz"])
+            self.assertEqual(imported[0].name, "mission.kmz")
+            self.assertEqual((root / "projects" / "Roof A" / "kmz" / "mission.kmz").read_bytes(), b"updated-kmz")
+            self.assertFalse((root / "projects" / "Roof A" / "kmz" / "mission-2.kmz").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_sanitize_filename_requires_kmz(self) -> None:
         self.assertEqual(sanitize_filename("my mission.kmz"), "my mission.kmz")
         with self.assertRaisesRegex(ValueError, "KMZ"):
