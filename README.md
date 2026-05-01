@@ -20,14 +20,6 @@ DJI RC 2\Internal shared storage\Android\data\dji.go.v5\files\waypoint
 - Normalizes KMZ internals to DJI's expected `wpmz/template.kml` and `wpmz/waylines.wpml` paths when the input KMZ has those files at the root.
 - Reads existing DJI waypoint packages from that same folder layout and leaves system folders such as `capability` and `map_preview` intact.
 - Can back up the controller waypoint folder into local zip files and restore one of those backups later.
-- Requires 10 identical DJI Fly dummy missions before the app unlocks.
-- The dummy missions should be made by creating one path with at least two waypoints, then using Save As / duplicate until there are 10 matching copies.
-- The app sorts matching dummy missions by KMZ creation time, oldest first, and remembers the controller-generated folder/KMZ IDs as slots 1-10 for the connected controller identity.
-- The Dummy Slot Manager can give saved slots local names and reorder the saved sequence if DJI Fly's history order needs correction.
-- Sync overwrites only the remembered dummy history slot KMZ files needed for the active project files.
-- Unused slots are left unchanged to avoid unnecessary MTP delete prompts.
-- Synced KMZ files are copied byte-for-byte and only renamed to the DJI slot filename, matching the manual replacement workflow. ShotSnap files and map preview thumbnails are left unchanged.
-- Preserves calibration paths whose filenames match common calibration naming patterns.
 
 ## Run
 
