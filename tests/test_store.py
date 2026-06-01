@@ -1,5 +1,6 @@
 import unittest
 import shutil
+import json
 from pathlib import Path
 
 from scanair_dji_importer.store import ProjectStore, sanitize_filename
@@ -71,10 +72,58 @@ class ProjectStoreTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_project_files_keep_manual_sync_order(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-file-order"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            store.create_project("Roof A")
+            store.set_active_project("Roof A")
+
+            source_dir = root / "incoming"
+            source_dir.mkdir()
+            first = source_dir / "first.kmz"
+            second = source_dir / "second.kmz"
+            third = source_dir / "third.kmz"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            third.write_bytes(b"third")
+            store.add_files([first, second, third])
+
+            self.assertTrue(store.move_file("Roof A", "third.kmz", -1))
+            self.assertTrue(store.move_file("Roof A", "third.kmz", -1))
+
+            self.assertEqual([file.name for file in store.get_project("Roof A").files], ["third.kmz", "first.kmz", "second.kmz"])
+            self.assertEqual([path.name for path in store.active_files()], ["third.kmz", "first.kmz", "second.kmz"])
+
+            third.write_bytes(b"third-updated")
+            store.add_files([third])
+            self.assertEqual([file.name for file in store.get_project("Roof A").files], ["third.kmz", "first.kmz", "second.kmz"])
+            self.assertEqual((root / "projects" / "Roof A" / "kmz" / "third.kmz").read_bytes(), b"third-updated")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_sanitize_filename_requires_kmz(self) -> None:
         self.assertEqual(sanitize_filename("my mission.kmz"), "my mission.kmz")
         with self.assertRaisesRegex(ValueError, "KMZ"):
             sanitize_filename("mission.txt")
+
+    def test_creator_website_defaults_to_path_domain(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-creator-settings"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            self.assertEqual(store.get_creator_settings()["website_url"], "https://path.scanair.ca")
+
+            state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+            state["creator"] = {"website_url": "https://scanair.ca/"}
+            (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+            self.assertEqual(store.get_creator_settings()["website_url"], "https://path.scanair.ca")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -13,6 +13,11 @@ from typing import Iterable
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "ScanAirDJIImporter"
 PROJECTS_DIR = APP_DIR / "projects"
 STATE_PATH = APP_DIR / "state.json"
+CREATOR_CACHE_DIR = APP_DIR / "creator-cache"
+DEFAULT_CREATOR_API_URL = os.environ.get("SCANAIR_CREATOR_API_URL", "https://api.scanair.ca")
+DEFAULT_CREATOR_WEBSITE_URL = os.environ.get("SCANAIR_CREATOR_WEBSITE_URL", "https://path.scanair.ca")
+LEGACY_DEFAULT_CREATOR_API_URLS = {"http://localhost:8000"}
+LEGACY_DEFAULT_CREATOR_WEBSITE_URLS = {"https://scanair.ca"}
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
 
 
@@ -68,6 +73,114 @@ class ProjectStore:
 
     def _write_state(self, state: dict) -> None:
         self.state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def get_creator_settings(self) -> dict[str, str]:
+        state = self._read_state()
+        settings = state.get("creator") if isinstance(state.get("creator"), dict) else {}
+        stored_base_url = str(settings.get("base_url") or "")
+        stored_website_url = str(settings.get("website_url") or "")
+        if "SCANAIR_CREATOR_API_URL" not in os.environ and stored_base_url in LEGACY_DEFAULT_CREATOR_API_URLS:
+            stored_base_url = ""
+        if (
+            "SCANAIR_CREATOR_WEBSITE_URL" not in os.environ
+            and stored_website_url.rstrip("/") in LEGACY_DEFAULT_CREATOR_WEBSITE_URLS
+        ):
+            stored_website_url = ""
+        return {
+            "base_url": stored_base_url or DEFAULT_CREATOR_API_URL,
+            "website_url": stored_website_url or DEFAULT_CREATOR_WEBSITE_URL,
+            "email": str(settings.get("email") or ""),
+            "access_token": str(settings.get("access_token") or ""),
+            "refresh_token": str(settings.get("refresh_token") or ""),
+        }
+
+    def set_creator_settings(
+        self,
+        *,
+        base_url: str,
+        access_token: str,
+        website_url: str = "",
+        email: str = "",
+        refresh_token: str = "",
+    ) -> None:
+        state = self._read_state()
+        previous = state.get("creator") if isinstance(state.get("creator"), dict) else {}
+        state["creator"] = {
+            "base_url": base_url.strip() or DEFAULT_CREATOR_API_URL,
+            "website_url": website_url.strip() or str(previous.get("website_url") or DEFAULT_CREATOR_WEBSITE_URL),
+            "email": email.strip() or str(previous.get("email") or ""),
+            "access_token": access_token.strip(),
+            "refresh_token": refresh_token.strip() or str(previous.get("refresh_token") or ""),
+        }
+        state["updated_at"] = utc_now()
+        self._write_state(state)
+
+    def clear_creator_session(self) -> None:
+        state = self._read_state()
+        settings = state.get("creator") if isinstance(state.get("creator"), dict) else {}
+        settings["access_token"] = ""
+        settings["refresh_token"] = ""
+        state["creator"] = settings
+        state["updated_at"] = utc_now()
+        self._write_state(state)
+
+    def clear_creator_cache(self) -> None:
+        shutil.rmtree(self.root / "creator-cache", ignore_errors=True)
+        (self.root / "creator-cache").mkdir(parents=True, exist_ok=True)
+
+    def write_creator_cache_file(self, filename: str, payload: bytes) -> Path:
+        if not payload:
+            raise ValueError(f"{filename} is empty.")
+        cache_dir = self.root / "creator-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        target = cache_dir / sanitize_filename(filename)
+        target.write_bytes(payload)
+        return target
+
+    def _project_meta_path(self, name: str) -> Path:
+        return self.project_path(name) / "project.json"
+
+    def _read_project_meta(self, name: str) -> dict:
+        path = self._project_meta_path(name)
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            data = {"name": sanitize_name(name), "created_at": utc_now()}
+        if not isinstance(data.get("file_order"), list):
+            data["file_order"] = []
+        return data
+
+    def _write_project_meta(self, name: str, meta: dict) -> None:
+        path = self._project_meta_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    def _ordered_file_paths(self, project_name: str, files_dir: Path) -> list[Path]:
+        files_by_name = {path.name: path for path in files_dir.glob("*.kmz")}
+        meta = self._read_project_meta(project_name)
+        saved_order = [name for name in meta.get("file_order", []) if name in files_by_name]
+        new_names = sorted(name for name in files_by_name if name not in saved_order)
+        order = saved_order + new_names
+        if order != meta.get("file_order", []):
+            meta["file_order"] = order
+            self._write_project_meta(project_name, meta)
+        return [files_by_name[name] for name in order]
+
+    def _set_file_order(self, project_name: str, order: list[str]) -> None:
+        files_dir = self.project_files_path(project_name)
+        existing = {path.name for path in files_dir.glob("*.kmz")}
+        cleaned = []
+        for name in order:
+            try:
+                safe_name = sanitize_filename(name)
+            except ValueError:
+                continue
+            if safe_name in existing and safe_name not in cleaned:
+                cleaned.append(safe_name)
+        cleaned.extend(sorted(name for name in existing if name not in cleaned))
+        meta = self._read_project_meta(project_name)
+        meta["file_order"] = cleaned
+        self._write_project_meta(project_name, meta)
 
     def project_path(self, name: str) -> Path:
         return self.projects_dir / sanitize_name(name)
@@ -139,7 +252,8 @@ class ProjectStore:
         if not path.exists():
             raise ValueError(f"Project '{name}' does not exist.")
         files = []
-        for file_path in sorted(self.project_files_path(path.name).glob("*.kmz")):
+        files_dir = self.project_files_path(path.name)
+        for file_path in self._ordered_file_paths(path.name, files_dir):
             stat = file_path.stat()
             files.append(
                 StoredFile(
@@ -177,7 +291,9 @@ class ProjectStore:
         if replace:
             for old_file in files_dir.glob("*.kmz"):
                 old_file.unlink()
+            self._set_file_order(project_dir.name, [])
         imported = []
+        current_order = [file.name for file in self.get_project(project_dir.name).files]
         for source_path in source_paths:
             safe_name = sanitize_filename(source_path.name)
             target = files_dir / safe_name
@@ -185,7 +301,10 @@ class ProjectStore:
                 target = unique_target(target)
             if source_path.resolve() != target.resolve():
                 shutil.copy2(source_path, target)
+            if target.name not in current_order:
+                current_order.append(target.name)
             imported.append(self.get_file(target_name, target.name))
+        self._set_file_order(project_dir.name, current_order)
         return imported
 
     def add_file_bytes(
@@ -209,7 +328,11 @@ class ProjectStore:
         target = files_dir / safe_name
         if not replace_existing_name:
             target = unique_target(target)
+        order = [file.name for file in self.get_project(project_dir.name).files]
         target.write_bytes(payload)
+        if target.name not in order:
+            order.append(target.name)
+            self._set_file_order(project_dir.name, order)
         return self.get_file(target_name, target.name)
 
     def delete_file(self, project_name: str, filename: str) -> None:
@@ -217,6 +340,24 @@ class ProjectStore:
         if not path.exists():
             raise ValueError(f"{filename} does not exist in {project_name}.")
         path.unlink()
+        order = [name for name in self._read_project_meta(project_name).get("file_order", []) if name != path.name]
+        self._set_file_order(project_name, order)
+
+    def move_file(self, project_name: str, filename: str, delta: int) -> bool:
+        if delta == 0:
+            return False
+        safe_name = sanitize_filename(filename)
+        order = [file.name for file in self.get_project(project_name).files]
+        try:
+            index = order.index(safe_name)
+        except ValueError:
+            return False
+        new_index = index + delta
+        if new_index < 0 or new_index >= len(order):
+            return False
+        order[index], order[new_index] = order[new_index], order[index]
+        self._set_file_order(project_name, order)
+        return True
 
     def get_file(self, project_name: str, filename: str) -> StoredFile:
         path = self.project_files_path(project_name) / sanitize_filename(filename)

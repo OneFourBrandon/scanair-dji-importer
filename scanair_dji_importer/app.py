@@ -3,10 +3,13 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
-import os
+import time
+import webbrowser
+from functools import partial
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import messagebox, simpledialog, ttk
 
+from .creator_client import CreatorApiError, CreatorClient, CreatorPath, CreatorProject, WebsiteAuthClient
 from .dji_mtp import (
     DjiControllerError,
     create_waypoint_backup,
@@ -19,27 +22,28 @@ from .dji_mtp import (
     verify_dummy_slots,
     verify_controller,
 )
-from .drag_drop import FileDropAdapter, make_tk_root_class
-from .server import ImportServer
 from .store import ProjectStore
 
+APP_ROOT = Path(__file__).resolve().parent
+DRONEPATH_LOGO_PATH = APP_ROOT / "assets" / "dronepath-logo.png"
 
-class ScanAirImporterApp(make_tk_root_class()):
+
+class ScanAirImporterApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ScanAir DJI Importer")
-        self.geometry("1040x680")
-        self.minsize(900, 560)
+        self.geometry("1040x780")
+        self.minsize(900, 680)
 
         self.store = ProjectStore()
-        self.store.ensure_default_project()
         self.messages: queue.Queue[str] = queue.Queue()
-        self.server = ImportServer(self.store, self.enqueue_status)
-        self.server.start()
-        self.drop_target = FileDropAdapter(lambda paths: self.after(0, lambda: self.import_dropped_files(paths)))
+        creator_settings = self.store.get_creator_settings()
 
-        self.project_var = tk.StringVar()
-        self.status_var = tk.StringVar(value=f"Ready. Import endpoint: {self.server.url}")
+        self.project_var = tk.StringVar(value="No cloud project selected")
+        self.status_var = tk.StringVar(value="Authorize with ScanAir to load cloud paths.")
+        self.creator_login_var = tk.StringVar(
+            value=f"Authorized as {creator_settings['email']}" if creator_settings["access_token"] else "Not authorized"
+        )
         self.device_var = tk.StringVar(value="Controller not checked")
         self.slot_status_var = tk.StringVar(value="Dummy missions are not verified.")
         self.controller_identity_var = tk.StringVar(value="Controller identity not checked")
@@ -52,21 +56,53 @@ class ScanAirImporterApp(make_tk_root_class()):
         self.sync_in_progress = False
         self.dummy_popup: tk.Toplevel | None = None
         self.slot_manager_window: tk.Toplevel | None = None
+        self.creator_window: tk.Toplevel | None = None
+        self.creator_projects: list[CreatorProject] = []
+        self.creator_path_rows: dict[str, CreatorPath] = {}
+        self.creator_base_url_var: tk.StringVar | None = None
+        self.creator_website_url_var: tk.StringVar | None = None
+        self.creator_email_var: tk.StringVar | None = None
+        self.creator_status_var: tk.StringVar | None = None
+        self.creator_project_list: tk.Listbox | None = None
+        self.creator_path_tree: ttk.Treeview | None = None
+        self.toast_var = tk.StringVar(value="Checking controller...")
+        self.status_bar: tk.Frame | None = None
+        self.status_indicator: tk.Frame | None = None
+        self.status_bar_label: tk.Label | None = None
+        self.logo_image: tk.PhotoImage | None = None
+        self.logo_header_image: tk.PhotoImage | None = None
         self.operational_widgets: list[tk.Widget] = []
 
+        self._load_branding()
         self._build_ui()
-        self._enable_drag_and_drop()
         self.set_operational_enabled(False)
-        self.show_dummy_setup_popup()
-        self.refresh_projects()
+        self.show_controller_toast("Checking controller...", kind="checking")
+        if creator_settings["access_token"]:
+            self.refresh_creator_projects_async()
         self.after(500, self.verify_dummy_slots_async)
         self.schedule_connection_check()
         self.after(200, self._drain_messages)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _load_branding(self) -> None:
+        if not DRONEPATH_LOGO_PATH.exists():
+            return
+        try:
+            self.logo_image = tk.PhotoImage(file=str(DRONEPATH_LOGO_PATH))
+            self.logo_header_image = self.logo_image.subsample(12, 12)
+            self.iconphoto(True, self.logo_image)
+        except tk.TclError:
+            self.logo_image = None
+            self.logo_header_image = None
+
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=16)
-        root.pack(fill=tk.BOTH, expand=True)
+        shell = ttk.Frame(self)
+        shell.pack(fill=tk.BOTH, expand=True)
+        shell.rowconfigure(0, weight=1)
+        shell.columnconfigure(0, weight=1)
+
+        root = ttk.Frame(shell, padding=16)
+        root.grid(row=0, column=0, sticky="nsew")
         root.columnconfigure(0, weight=0)
         root.columnconfigure(1, weight=1)
         root.rowconfigure(1, weight=1)
@@ -76,53 +112,59 @@ class ScanAirImporterApp(make_tk_root_class()):
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="ScanAir DJI Importer", font=("Segoe UI", 18, "bold")).grid(row=0, column=0, sticky="w")
         ttk.Label(header, textvariable=self.status_var).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        if self.logo_header_image is not None:
+            ttk.Label(header, image=self.logo_header_image).grid(row=0, column=1, rowspan=2, sticky="ne")
 
-        project_panel = ttk.LabelFrame(root, text="Projects", padding=12)
+        project_panel = ttk.LabelFrame(root, text="ScanAir Cloud", padding=12)
         project_panel.grid(row=1, column=0, sticky="nsew", padx=(0, 12))
-        project_panel.rowconfigure(1, weight=1)
+        project_panel.rowconfigure(0, weight=1)
 
-        self.new_project_button = ttk.Button(project_panel, text="New Project", command=self.create_project)
-        self.new_project_button.grid(row=0, column=0, sticky="ew")
         self.project_list = tk.Listbox(project_panel, width=30, exportselection=False)
-        self.project_list.grid(row=1, column=0, sticky="nsew", pady=10)
-        self.project_list.bind("<<ListboxSelect>>", lambda _event: self.select_project_from_list())
-        self.set_active_button = ttk.Button(project_panel, text="Set Active", command=self.set_selected_active)
-        self.set_active_button.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        self.delete_project_button = ttk.Button(project_panel, text="Delete Project", command=self.delete_project)
-        self.delete_project_button.grid(row=3, column=0, sticky="ew")
+        self.project_list.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        self.creator_project_list = self.project_list
+        self.project_list.bind("<<ListboxSelect>>", lambda _event: self.on_cloud_project_selected())
+        self.set_active_button = ttk.Button(project_panel, text="Refresh Projects", command=self.refresh_creator_projects_async)
+        self.set_active_button.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        self.delete_project_button = ttk.Button(project_panel, text="Sign Out", command=self.sign_out_creator)
+        self.delete_project_button.grid(row=2, column=0, sticky="ew")
 
-        main = ttk.Frame(root)
-        main.grid(row=1, column=1, sticky="nsew")
-        main.columnconfigure(0, weight=1)
-        main.rowconfigure(1, weight=1)
+        main_frame = ttk.Frame(root)
+        main_frame.grid(row=1, column=1, sticky="nsew")
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(1, weight=1)
 
-        active_bar = ttk.LabelFrame(main, text="Active Project", padding=12)
+        active_bar = ttk.LabelFrame(main_frame, text="ScanAir Account", padding=12)
         active_bar.grid(row=0, column=0, sticky="ew")
         active_bar.columnconfigure(1, weight=1)
-        ttk.Label(active_bar, text="Website imports into:").grid(row=0, column=0, sticky="w")
-        ttk.Label(active_bar, textvariable=self.project_var, font=("Segoe UI", 11, "bold")).grid(row=0, column=1, sticky="w", padx=(8, 0))
-        self.import_button = ttk.Button(active_bar, text="Import KMZ Files", command=self.import_files)
+        ttk.Label(active_bar, textvariable=self.creator_login_var, font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        self.import_button = ttk.Button(active_bar, text="Authorize With Website", command=self.authorize_creator_with_website)
         self.import_button.grid(row=0, column=2, padx=(8, 0))
+        self.creator_button = ttk.Button(active_bar, text="Refresh Projects", command=self.refresh_creator_projects_async)
+        self.creator_button.grid(row=0, column=3, padx=(8, 0))
+        ttk.Label(active_bar, textvariable=self.project_var).grid(row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
         self.drop_label = ttk.Label(
             active_bar,
-            text="Drop KMZ files here to import into the active project",
+            text="Select ScanAir cloud paths below, then sync them to the connected DJI RC 2.",
             anchor="center",
             relief=tk.RIDGE,
             padding=(12, 10),
         )
-        self.drop_label.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        self.drop_label.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(10, 0))
 
-        files_panel = ttk.LabelFrame(main, text="Stored KMZ Files", padding=12)
+        files_panel = ttk.LabelFrame(main_frame, text="ScanAir Cloud Paths (Sync Order)", padding=12)
         files_panel.grid(row=1, column=0, sticky="nsew", pady=12)
         files_panel.rowconfigure(0, weight=1)
         files_panel.columnconfigure(0, weight=1)
-        columns = ("name", "size", "modified")
-        self.files_tree = ttk.Treeview(files_panel, columns=columns, show="headings", selectmode="extended")
-        self.files_tree.heading("name", text="Name")
-        self.files_tree.heading("size", text="Size")
-        self.files_tree.heading("modified", text="Modified")
-        self.files_tree.column("name", width=360, anchor="w")
-        self.files_tree.column("size", width=100, anchor="e")
+        columns = ("slot", "name", "status", "modified")
+        self.files_tree = ttk.Treeview(files_panel, columns=columns, show="headings", selectmode="extended", height=10)
+        self.creator_path_tree = self.files_tree
+        self.files_tree.heading("slot", text="Slot")
+        self.files_tree.heading("name", text="Path")
+        self.files_tree.heading("status", text="Status")
+        self.files_tree.heading("modified", text="Updated")
+        self.files_tree.column("slot", width=60, anchor="center", stretch=False)
+        self.files_tree.column("name", width=320, anchor="w")
+        self.files_tree.column("status", width=140, anchor="w")
         self.files_tree.column("modified", width=220, anchor="w")
         self.files_tree.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(files_panel, orient=tk.VERTICAL, command=self.files_tree.yview)
@@ -130,12 +172,16 @@ class ScanAirImporterApp(make_tk_root_class()):
         self.files_tree.configure(yscrollcommand=scrollbar.set)
         file_buttons = ttk.Frame(files_panel)
         file_buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        self.remove_files_button = ttk.Button(file_buttons, text="Remove Selected", command=self.remove_selected_files)
+        self.remove_files_button = ttk.Button(file_buttons, text="Sync Selected Paths", command=self.load_selected_creator_paths_to_controller)
         self.remove_files_button.pack(side=tk.LEFT)
-        self.open_project_button = ttk.Button(file_buttons, text="Open Project Folder", command=self.open_active_project_folder)
+        self.move_file_up_button = ttk.Button(file_buttons, text="Move Up", command=lambda: self.move_selected_file(-1))
+        self.move_file_up_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.move_file_down_button = ttk.Button(file_buttons, text="Move Down", command=lambda: self.move_selected_file(1))
+        self.move_file_down_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.open_project_button = ttk.Button(file_buttons, text="Refresh Paths", command=self.refresh_creator_projects_async)
         self.open_project_button.pack(side=tk.LEFT, padx=(8, 0))
 
-        device_panel = ttk.LabelFrame(main, text="DJI RC 2 Sync", padding=12)
+        device_panel = ttk.LabelFrame(main_frame, text="DJI RC 2 Sync", padding=12)
         device_panel.grid(row=2, column=0, sticky="ew")
         device_panel.columnconfigure(0, weight=1)
         ttk.Label(device_panel, textvariable=self.device_var).grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 8))
@@ -146,13 +192,13 @@ class ScanAirImporterApp(make_tk_root_class()):
         self.show_device_files_button.grid(row=2, column=1, padx=8)
         self.manage_slots_button = ttk.Button(device_panel, text="Manage Dummy Slots", command=self.manage_dummy_slots)
         self.manage_slots_button.grid(row=2, column=2, padx=(0, 8))
-        self.sync_button = ttk.Button(device_panel, text="Sync Active Project", command=self.sync_active_project)
+        self.sync_button = ttk.Button(device_panel, text="Sync Selected Paths", command=self.sync_active_project)
         self.sync_button.grid(row=2, column=3)
         self.sync_progress = ttk.Progressbar(device_panel, mode="indeterminate")
         self.sync_progress.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         self.sync_progress.grid_remove()
 
-        backup_panel = ttk.LabelFrame(main, text="Backup Manager", padding=12)
+        backup_panel = ttk.LabelFrame(main_frame, text="Backup Manager", padding=12)
         backup_panel.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         backup_panel.columnconfigure(0, weight=1)
         self.backup_list = tk.Listbox(backup_panel, height=4, exportselection=False)
@@ -165,28 +211,34 @@ class ScanAirImporterApp(make_tk_root_class()):
         self.remove_backup_button.grid(row=2, column=1, sticky="ew", pady=(0, 4))
         ttk.Button(backup_panel, text="Refresh Backups", command=self.refresh_backups).grid(row=3, column=1, sticky="ew")
         self.operational_widgets = [
-            self.new_project_button,
-            self.set_active_button,
-            self.delete_project_button,
-            self.import_button,
             self.remove_files_button,
-            self.open_project_button,
             self.show_device_files_button,
             self.manage_slots_button,
             self.sync_button,
             self.backup_button,
             self.restore_button,
-            self.remove_backup_button,
         ]
+        self._build_controller_status_bar(shell)
 
-    def _enable_drag_and_drop(self) -> None:
-        registered = [
-            self.drop_target.register(self, self, self.drop_label, self.files_tree),
-        ]
-        if any(registered):
-            self.set_status(f"Ready. Drop KMZ files into the app or use {self.server.url}")
-        else:
-            self.drop_label.configure(text="Use Import KMZ Files to add files. Drag-and-drop requires tkinterdnd2.")
+    def _build_controller_status_bar(self, shell: ttk.Frame) -> None:
+        self.status_bar = tk.Frame(shell, bg="#f3f4f6", bd=0, highlightthickness=1, highlightbackground="#d1d5db")
+        self.status_bar.grid(row=1, column=0, sticky="ew")
+        self.status_bar.columnconfigure(1, weight=1)
+        self.status_indicator = tk.Frame(self.status_bar, width=10, height=10, bg="#4b5563", bd=0, highlightthickness=0)
+        self.status_indicator.grid(row=0, column=0, padx=(14, 8), pady=8)
+        self.status_indicator.grid_propagate(False)
+        self.status_bar_label = tk.Label(
+            self.status_bar,
+            textvariable=self.toast_var,
+            bg="#f3f4f6",
+            fg="#111827",
+            padx=0,
+            pady=5,
+            justify=tk.LEFT,
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self.status_bar_label.grid(row=0, column=1, sticky="ew")
 
     def set_operational_enabled(self, enabled: bool) -> None:
         state = tk.NORMAL if enabled else tk.DISABLED
@@ -194,40 +246,19 @@ class ScanAirImporterApp(make_tk_root_class()):
             widget["state"] = state
 
     def show_dummy_setup_popup(self) -> None:
-        if self.dummy_popup and self.dummy_popup.winfo_exists():
-            self.dummy_popup.deiconify()
-            self.dummy_popup.lift()
-            return
-        popup = tk.Toplevel(self)
-        popup.title("DJI RC 2 Setup Required")
-        popup.geometry("660x520")
-        popup.minsize(580, 420)
-        popup.resizable(True, True)
-        popup.attributes("-topmost", True)
-        popup.protocol("WM_DELETE_WINDOW", popup.lift)
-        self.dummy_popup = popup
-        outer = ttk.Frame(popup, padding=18)
-        outer.pack(fill=tk.BOTH, expand=True)
-        outer.rowconfigure(0, weight=1)
-        outer.columnconfigure(0, weight=1)
-        canvas = tk.Canvas(outer, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=scrollbar.set)
-        frame = ttk.Frame(canvas, padding=(0, 0, 10, 0))
-        window_id = canvas.create_window((0, 0), window=frame, anchor="nw")
-        frame.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(window_id, width=event.width))
-        ttk.Label(frame, text="Create 10 DJI Fly dummy missions", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        instructions = (
-            "On the RC 2, create one waypoint mission in DJI Fly with at least 2 waypoints.\n\n"
-            "Use Save As / duplicate until there are 10 identical copies of that same path.\n\n"
-            "ScanAir sorts those copies by KMZ creation time, newest first, and remembers their controller-generated IDs for this physical controller."
-        )
-        ttk.Label(frame, text=instructions, wraplength=470, justify=tk.LEFT).pack(anchor="w", pady=(12, 12))
-        ttk.Label(frame, textvariable=self.slot_status_var, wraplength=590, justify=tk.LEFT).pack(anchor="w", pady=(0, 14))
-        ttk.Button(frame, text="Re-check Controller", command=self.verify_dummy_slots_async).pack(anchor="e")
+        self.show_controller_toast("DJI RC 2 setup needed. Connect the controller, unlock it, and verify dummy slots.", kind="error")
+
+    def show_controller_toast(self, message: str, *, kind: str) -> None:
+        colors = {
+            "ok": "#047857",
+            "checking": "#4b5563",
+            "error": "#b45309",
+            "offline": "#991b1b",
+        }
+        color = colors.get(kind, "#4b5563")
+        self.toast_var.set(message)
+        if self.status_indicator is not None:
+            self.status_indicator.configure(bg=color)
 
     def verify_dummy_slots_async(self) -> None:
         if self.verification_in_progress:
@@ -257,22 +288,22 @@ class ScanAirImporterApp(make_tk_root_class()):
         self.verification_in_progress = False
         self.controller_connected = ok
         self.dummy_verified = ok
-        self.slot_status_var.set(message)
+        display_message = friendly_waiting_message(message) if not ok and is_controller_disconnect_message(message) else message
+        self.slot_status_var.set(display_message)
         self.controller_identity_var.set(f"Controller identity: {controller_label}")
         self.set_operational_enabled(ok)
         if ok:
             self.device_var.set("Dummy slots verified for connected controller")
             self.set_status("Ready. Dummy slot IDs verified.")
-            if self.dummy_popup and self.dummy_popup.winfo_exists():
-                self.dummy_popup.destroy()
-            self.bring_main_window_to_front()
+            self.show_controller_toast("DJI RC 2 connected. Dummy slots verified.", kind="ok")
         else:
             self.device_var.set("Dummy slots not verified")
             if "controller was not found" in message.lower():
                 self.set_status("DJI RC 2 disconnected. Plug it back in, unlock it, and choose file transfer.")
+                self.show_controller_toast("DJI RC 2 disconnected.", kind="offline")
             else:
                 self.set_status("Setup required: create/duplicate 10 identical dummy missions on the RC 2.")
-            self.show_dummy_setup_popup()
+                self.show_controller_toast("DJI RC 2 connected, but dummy slots need setup.", kind="error")
         self.schedule_connection_check()
 
     def schedule_connection_check(self, delay_ms: int = 5000) -> None:
@@ -310,6 +341,7 @@ class ScanAirImporterApp(make_tk_root_class()):
                 self.controller_connected = True
                 self.device_var.set("DJI RC 2 reconnected")
                 self.set_status("DJI RC 2 reconnected. Verifying dummy slots...")
+                self.show_controller_toast("DJI RC 2 reconnected. Verifying dummy slots...", kind="checking")
                 self.verify_dummy_slots_async()
                 return
             self.schedule_connection_check()
@@ -324,10 +356,10 @@ class ScanAirImporterApp(make_tk_root_class()):
         self.dummy_verified = False
         self.device_var.set("DJI RC 2 disconnected")
         self.controller_identity_var.set("Controller identity not checked")
-        self.slot_status_var.set(message)
+        self.slot_status_var.set(friendly_waiting_message(message))
         self.set_operational_enabled(False)
         self.set_status("DJI RC 2 disconnected. Plug it back in, unlock it, and choose file transfer.")
-        self.show_dummy_setup_popup()
+        self.show_controller_toast("DJI RC 2 disconnected.", kind="offline")
 
     def bring_main_window_to_front(self) -> None:
         self.deiconify()
@@ -339,143 +371,255 @@ class ScanAirImporterApp(make_tk_root_class()):
     def require_dummy_slots(self) -> bool:
         if self.dummy_verified:
             return True
-        self.show_dummy_setup_popup()
+        self.show_controller_toast("Connect and verify the DJI RC 2 before syncing.", kind="error")
         self.set_status("Connect and verify the DJI RC 2 before using the importer.")
         return False
 
+    def require_creator_auth(self) -> bool:
+        if self.store.get_creator_settings()["access_token"]:
+            return True
+        self.set_creator_status("Authorize with the ScanAir website before using the importer.")
+        messagebox.showwarning(
+            "ScanAir Authorization",
+            "Authorize with the ScanAir website before loading or syncing paths.",
+            parent=self.creator_window or self,
+        )
+        return False
+
     def refresh_projects(self) -> None:
-        active = self.store.get_active_project_name()
-        self.project_var.set(active or "No project selected")
-        self.project_list.delete(0, tk.END)
-        for project in self.store.list_projects():
-            label = f"* {project.name}" if project.active else f"  {project.name}"
-            self.project_list.insert(tk.END, label)
-            if project.active:
-                self.project_list.selection_clear(0, tk.END)
-                self.project_list.selection_set(tk.END)
-        self.refresh_files()
+        self.refresh_creator_path_list()
         self.refresh_backups()
 
     def refresh_files(self) -> None:
-        self.files_tree.delete(*self.files_tree.get_children())
-        active = self.store.get_active_project_name()
-        if not active:
-            return
-        for stored in self.store.get_project(active).files:
-            self.files_tree.insert("", tk.END, values=(stored.name, format_size(stored.size), stored.modified_at))
-
-    def selected_project_name(self) -> str | None:
-        selection = self.project_list.curselection()
-        if not selection:
-            return None
-        raw = self.project_list.get(selection[0])
-        return raw.replace("*", "", 1).strip()
+        self.refresh_creator_path_list()
 
     def select_project_from_list(self) -> None:
-        project = self.selected_project_name()
+        project = self.selected_creator_project()
         if project:
-            self.project_var.set(project)
+            self.project_var.set(project.name)
 
     def set_selected_active(self) -> None:
-        project = self.selected_project_name()
-        if not project:
-            return
-        self.store.set_active_project(project)
-        self.set_status(f"Active project set to {project}.")
-        self.refresh_projects()
+        self.refresh_creator_projects_async()
 
     def create_project(self) -> None:
-        if not self.require_dummy_slots():
-            return
-        name = simpledialog.askstring("New Project", "Project name:", parent=self)
-        if not name:
-            return
-        try:
-            self.store.create_project(name)
-            self.store.set_active_project(name)
-            self.set_status(f"Created project {name}.")
-            self.refresh_projects()
-        except Exception as exc:
-            messagebox.showerror("Project Error", str(exc), parent=self)
+        self.authorize_creator_with_website()
 
     def delete_project(self) -> None:
-        if not self.require_dummy_slots():
-            return
-        project = self.selected_project_name()
-        if not project:
-            return
-        if not messagebox.askyesno("Delete Project", f"Delete project '{project}' and its stored KMZ files?", parent=self):
-            return
-        try:
-            self.store.delete_project(project)
-            if not self.store.list_project_names():
-                self.store.create_project("Default")
-                self.store.set_active_project("Default")
-            self.set_status(f"Deleted project {project}.")
-            self.refresh_projects()
-        except Exception as exc:
-            messagebox.showerror("Project Error", str(exc), parent=self)
+        self.sign_out_creator()
 
     def import_files(self) -> None:
-        if not self.require_dummy_slots():
-            return
-        paths = filedialog.askopenfilenames(
-            parent=self,
-            title="Import DJI KMZ files",
-            filetypes=[("DJI KMZ files", "*.kmz"), ("All files", "*.*")],
-        )
-        if not paths:
-            return
-        try:
-            self.import_paths([Path(path) for path in paths])
-        except Exception as exc:
-            messagebox.showerror("Import Error", str(exc), parent=self)
-
-    def import_dropped_files(self, paths: list[Path]) -> None:
-        if not self.require_dummy_slots():
-            return
-        try:
-            self.import_paths(paths)
-        except Exception as exc:
-            messagebox.showerror("Drop Import Error", str(exc), parent=self)
-
-    def import_paths(self, paths: list[Path]) -> None:
-        kmz_paths = [path for path in paths if path.is_file() and path.suffix.lower() == ".kmz"]
-        skipped = len(paths) - len(kmz_paths)
-        if not kmz_paths:
-            raise ValueError("Drop one or more .kmz files to import into the active project.")
-        imported = self.store.add_files(kmz_paths)
-        suffix = f" Skipped {skipped} non-KMZ item(s)." if skipped else ""
-        self.set_status(f"Imported {len(imported)} KMZ file(s) into {self.store.get_active_project_name()}.{suffix}")
-        self.refresh_projects()
+        self.authorize_creator_with_website()
 
     def remove_selected_files(self) -> None:
-        if not self.require_dummy_slots():
-            return
-        active = self.store.get_active_project_name()
-        if not active:
-            return
+        self.load_selected_creator_paths_to_controller()
+
+    def move_selected_file(self, delta: int) -> None:
         selected = self.files_tree.selection()
         if not selected:
             return
-        names = [self.files_tree.item(item, "values")[0] for item in selected]
-        if not messagebox.askyesno("Remove Files", f"Remove {len(names)} stored KMZ file(s) from {active}?", parent=self):
+        item = selected[0]
+        siblings = list(self.files_tree.get_children(""))
+        index = siblings.index(item)
+        new_index = index + delta
+        if new_index < 0 or new_index >= len(siblings):
             return
-        try:
-            for name in names:
-                self.store.delete_file(active, name)
-            self.set_status(f"Removed {len(names)} KMZ file(s).")
-            self.refresh_projects()
-        except Exception as exc:
-            messagebox.showerror("File Error", str(exc), parent=self)
+        self.files_tree.move(item, "", new_index)
+        self._renumber_path_rows()
+        self.files_tree.selection_set(item)
+        self.files_tree.focus(item)
+        self.files_tree.see(item)
+        direction = "up" if delta < 0 else "down"
+        self.set_status(f"Moved selected cloud path {direction}. It will sync to the displayed slot number.")
+
+    def _renumber_path_rows(self) -> None:
+        if not self.creator_path_tree:
+            return
+        for index, item in enumerate(self.creator_path_tree.get_children(""), start=1):
+            values = list(self.creator_path_tree.item(item, "values"))
+            if values:
+                values[0] = index
+                self.creator_path_tree.item(item, values=values)
 
     def open_active_project_folder(self) -> None:
+        self.refresh_creator_projects_async()
+
+    def creator_client_from_window(self) -> CreatorClient:
+        settings = self.store.get_creator_settings()
+        base_url = self.creator_base_url_var.get() if self.creator_base_url_var else settings["base_url"]
+        access_token = settings["access_token"]
+        website_url = self.creator_website_url_var.get() if self.creator_website_url_var else settings["website_url"]
+        self.store.set_creator_settings(
+            base_url=base_url,
+            website_url=website_url,
+            access_token=access_token,
+            email=settings["email"],
+            refresh_token=settings["refresh_token"],
+        )
+        return CreatorClient(base_url, access_token)
+
+    def authorize_creator_with_website(self) -> None:
+        settings = self.store.get_creator_settings()
+        base_url = self.creator_base_url_var.get() if self.creator_base_url_var else settings["base_url"]
+        website_url = self.creator_website_url_var.get() if self.creator_website_url_var else settings["website_url"]
+        self.store.set_creator_settings(base_url=base_url, website_url=website_url, access_token="")
+        self.set_creator_status("Starting website authorization...")
+
+        def runner() -> None:
+            try:
+                auth_client = WebsiteAuthClient(base_url)
+                session = auth_client.start()
+                if not session.code:
+                    raise CreatorApiError("Creator backend did not return an authorization code.")
+                auth_url = f"{website_url.rstrip('/')}/?desktop_auth_code={session.code}"
+                webbrowser.open(auth_url)
+                self.after(0, lambda: self.set_creator_status("Authorize the importer in the browser window that just opened."))
+                deadline = time.monotonic() + max(session.expires_in, 1)
+                while time.monotonic() < deadline:
+                    time.sleep(2)
+                    polled = auth_client.poll(session.code)
+                    if polled.status == "authorized" and polled.access_token:
+                        self.store.set_creator_settings(
+                            base_url=base_url,
+                            website_url=website_url,
+                            access_token=polled.access_token,
+                            email=polled.email,
+                        )
+                        self.after(0, partial(self.apply_creator_authorized, polled.email))
+                        return
+                raise CreatorApiError("Website authorization expired. Try again.")
+            except CreatorApiError as exc:
+                error_message = str(exc)
+                self.after(0, partial(self.set_creator_status, error_message))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def apply_creator_authorized(self, email: str) -> None:
+        label = f"Authorized as {email}" if email else "Authorized"
+        if self.creator_login_var is not None:
+            self.creator_login_var.set(label)
+        self.set_creator_status("Website authorization complete. Loading cloud projects...")
+        self.refresh_creator_projects_async()
+
+    def sign_out_creator(self) -> None:
+        self.store.clear_creator_session()
+        if self.creator_login_var is not None:
+            self.creator_login_var.set("Not authorized")
+        if self.creator_project_list is not None:
+            self.creator_project_list.delete(0, tk.END)
+        if self.creator_path_tree is not None:
+            self.creator_path_tree.delete(*self.creator_path_tree.get_children())
+        self.creator_projects = []
+        self.creator_path_rows = {}
+        self.project_var.set("No cloud project selected")
+        self.set_creator_status("Signed out of Creator.")
+
+    def refresh_creator_projects_async(self) -> None:
+        if not self.store.get_creator_settings()["access_token"]:
+            self.set_creator_status("Authorize with the ScanAir website before loading projects.")
+            return
+        self.set_creator_status("Loading cloud projects...")
+        client = self.creator_client_from_window()
+
+        def runner() -> None:
+            try:
+                loaded_projects = client.list_projects()
+            except CreatorApiError as exc:
+                error_message = str(exc)
+                self.after(0, partial(self.set_creator_status, error_message))
+                return
+            self.after(0, partial(self.apply_creator_projects, loaded_projects))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def apply_creator_projects(self, projects: list[CreatorProject]) -> None:
+        self.creator_projects = projects
+        if not self.creator_project_list:
+            return
+        self.creator_project_list.delete(0, tk.END)
+        for project in projects:
+            self.creator_project_list.insert(tk.END, f"{project.name} ({len(project.paths)} path{'s' if len(project.paths) != 1 else ''})")
+        if projects:
+            self.creator_project_list.selection_set(0)
+            self.project_var.set(projects[0].name)
+        else:
+            self.project_var.set("No cloud project selected")
+        self.refresh_creator_path_list()
+        self.set_creator_status(f"Loaded {len(projects)} cloud project(s).")
+
+    def selected_creator_project(self) -> CreatorProject | None:
+        if not self.creator_project_list:
+            return None
+        selection = self.creator_project_list.curselection()
+        if not selection:
+            return None
+        index = selection[0]
+        return self.creator_projects[index] if index < len(self.creator_projects) else None
+
+    def on_cloud_project_selected(self) -> None:
+        project = self.selected_creator_project()
+        self.project_var.set(project.name if project else "No cloud project selected")
+        self.refresh_creator_path_list()
+
+    def refresh_creator_path_list(self) -> None:
+        if not self.creator_path_tree:
+            return
+        self.creator_path_tree.delete(*self.creator_path_tree.get_children())
+        self.creator_path_rows = {}
+        project = self.selected_creator_project()
+        if not project:
+            return
+        self.project_var.set(project.name)
+        for index, path in enumerate(project.paths, start=1):
+            status_text = "Ready" if path.has_mission_area else "Missing area"
+            self.creator_path_rows[path.path_id] = path
+            self.creator_path_tree.insert("", tk.END, iid=path.path_id, values=(index, path.name, status_text, path.updated_at))
+
+    def selected_creator_paths(self) -> list[CreatorPath]:
+        if not self.creator_path_tree:
+            return []
+        selected = set(self.creator_path_tree.selection())
+        return [self.creator_path_rows[item] for item in self.creator_path_tree.get_children("") if item in selected and item in self.creator_path_rows]
+
+    def load_selected_creator_paths_to_controller(self) -> None:
+        if not self.require_creator_auth():
+            return
         if not self.require_dummy_slots():
             return
-        active = self.store.get_active_project_name()
-        if not active:
+        paths = self.selected_creator_paths()
+        if not paths:
+            messagebox.showwarning("Creator Paths", "Select one or more creator paths to load.", parent=self.creator_window or self)
             return
-        os.startfile(self.store.project_files_path(active))
+        prompt = (
+            f"Generate {len(paths)} ScanAir path(s) and sync them to the DJI RC 2?\n\n"
+            "Generation is handled by the ScanAir website backend, including account, subscription, and mission limit checks."
+        )
+        if not messagebox.askyesno("Load Creator Paths", prompt, parent=self.creator_window or self):
+            return
+        client = self.creator_client_from_window()
+        self.start_sync_progress()
+        self.run_background("Downloading creator paths and syncing to DJI RC 2...", partial(self._download_creator_paths, paths, client, sync_after=True))
+
+    def _download_creator_paths(self, paths: list[CreatorPath], client: CreatorClient, *, sync_after: bool) -> None:
+        self.store.clear_creator_cache()
+        downloaded = []
+        for path in paths:
+            if not path.has_mission_area:
+                raise ValueError(f"{path.name} has no mission area to generate.")
+            package = client.download_path_kmz(path.project_id, path.path_id)
+            downloaded.append(self.store.write_creator_cache_file(package.filename, package.payload))
+        if sync_after:
+            result = sync_files(downloaded)
+            skipped = f"; skipped {len(result.skipped)} existing folder(s)" if result.skipped else ""
+            message = f"Downloaded {len(downloaded)} creator path(s). Sync complete. Updated {len(result.copied)} dummy slot(s){skipped}."
+        else:
+            message = f"Downloaded {len(downloaded)} creator path(s) into the importer cache."
+        self.enqueue_status(message)
+        self.show_info_async("Creator Paths", message)
+
+    def set_creator_status(self, message: str) -> None:
+        if self.creator_status_var is not None:
+            self.creator_status_var.set(message)
+        self.set_status(message)
 
     def check_controller(self) -> None:
         self.verify_dummy_slots_async()
@@ -629,21 +773,7 @@ class ScanAirImporterApp(make_tk_root_class()):
         refresh_tree(0)
 
     def sync_active_project(self) -> None:
-        if not self.require_dummy_slots():
-            return
-        active = self.store.get_active_project_name()
-        files = self.store.active_files()
-        if not active or not files:
-            messagebox.showwarning("Sync", "The active project has no KMZ files to sync.", parent=self)
-            return
-        prompt = (
-            f"Sync {len(files)} KMZ file(s) from '{active}' to the DJI RC 2?\n\n"
-            "This overwrites the matching remembered dummy slots in sequence. Unused slots are left unchanged."
-        )
-        if not messagebox.askyesno("Sync Active Project", prompt, parent=self):
-            return
-        self.start_sync_progress()
-        self.run_background("Syncing active project to DJI RC 2...", lambda: self._sync_files(files))
+        self.load_selected_creator_paths_to_controller()
 
     def _sync_files(self, files: list[Path]) -> None:
         result = sync_files(files)
@@ -783,7 +913,7 @@ class ScanAirImporterApp(make_tk_root_class()):
             except queue.Empty:
                 break
             self.set_status(message)
-            self.refresh_projects()
+            self.refresh_backups()
         self.after(200, self._drain_messages)
 
     def set_status(self, message: str) -> None:
@@ -793,8 +923,6 @@ class ScanAirImporterApp(make_tk_root_class()):
         if self.connection_check_after_id is not None:
             self.after_cancel(self.connection_check_after_id)
             self.connection_check_after_id = None
-        self.drop_target.unregister_all()
-        self.server.stop()
         self.destroy()
 
 
@@ -823,6 +951,15 @@ def is_controller_disconnect_message(message: str) -> bool:
             "0x80010108",
             "0x800706ba",
         )
+    )
+
+
+def friendly_waiting_message(detail: str = "") -> str:
+    suffix = f"\n\nLast check: {detail}" if detail and "controller was not found" not in detail.lower() else ""
+    return (
+        "Waiting for a DJI RC 2 controller.\n\n"
+        "Plug in the controller by USB, unlock it, and choose file transfer if Windows or Android asks."
+        f"{suffix}"
     )
 
 

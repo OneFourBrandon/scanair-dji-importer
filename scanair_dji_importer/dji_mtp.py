@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 from xml.sax.saxutils import escape
 
 
@@ -149,7 +149,7 @@ def extract_kmz_mission_name(file_path: Path) -> str | None:
                 name = extract_xml_mission_name(archive.read(candidate))
                 if name:
                     return name
-    except Exception:
+    except (OSError, BadZipFile):
         return None
     return None
 
@@ -163,7 +163,7 @@ def extract_kmz_create_time_ms(file_path: Path) -> int | None:
                 create_time = extract_xml_create_time_ms(archive.read(candidate))
                 if create_time is not None:
                     return create_time
-    except Exception:
+    except (OSError, BadZipFile):
         return None
     return None
 
@@ -191,7 +191,7 @@ def extract_kmz_waypoint_signature(file_path: Path) -> str | None:
                 signature = extract_xml_waypoint_signature(archive.read(candidate))
                 if signature:
                     return signature
-    except Exception:
+    except (OSError, BadZipFile):
         return None
     return None
 
@@ -840,7 +840,7 @@ $graphics.Dispose()
 $bitmap.Dispose()
 """
         )
-    except Exception:
+    except (DjiControllerError, OSError):
         path.write_bytes(PLACEHOLDER_JPG)
 
 
@@ -1012,6 +1012,7 @@ def _run_ps(script: str) -> str:
     with tempfile.NamedTemporaryFile("w", suffix=".ps1", encoding="utf-8", delete=False) as handle:
         handle.write(script)
         script_path = Path(handle.name)
+    completed: subprocess.CompletedProcess[str] | None = None
     try:
         completed = subprocess.run(
             [
@@ -1032,6 +1033,8 @@ def _run_ps(script: str) -> str:
             script_path.unlink()
         except OSError:
             pass
+    if completed is None:
+        raise DjiControllerError("PowerShell MTP command did not start.")
     if completed.returncode != 0:
         message = (completed.stderr or completed.stdout or "PowerShell MTP command failed.").strip()
         raise DjiControllerError(message)

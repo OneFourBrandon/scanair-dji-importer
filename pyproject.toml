@@ -1,9 +1,12 @@
 [project]
 name = "scanair-dji-importer"
 version = "0.1.0"
-description = "Desktop project manager and DJI RC 2 KMZ sync helper for ScanAir."
+description = "Desktop ScanAir cloud path sync helper for DJI RC 2."
 requires-python = ">=3.11"
-dependencies = ["tkinterdnd2>=0.4.3"]
+dependencies = []
+
+[project.optional-dependencies]
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 scanair-dji-importer = "scanair_dji_importer.app:main"
