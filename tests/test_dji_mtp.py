@@ -10,6 +10,7 @@ from scanair_dji_importer.dji_mtp import (
     DummySlotVerification,
     build_slot_sync_files,
     build_sync_packages,
+    clear_controller_mapping,
     extract_kmz_mission_name,
     extract_kmz_create_time_ms,
     extract_kmz_waypoint_signature,
@@ -137,10 +138,13 @@ class DjiMtpTests(unittest.TestCase):
             self.assertTrue(second_kmz.exists())
             self.assertEqual(extract_kmz_mission_name(first_kmz), "Customer Mission")
             self.assertEqual(extract_kmz_mission_name(second_kmz), "Second Mission")
+            self.assertGreater(first_kmz.stat().st_mtime, second_kmz.stat().st_mtime)
             self.assertFalse((staging / "1" / "ShotSnap.json").exists())
             self.assertFalse((staging / "2" / "ShotSnap.json").exists())
             self.assertFalse((staging / "1" / "ABC-ID.jpg").exists())
             self.assertFalse((staging / "2" / "DEF-ID.jpg").exists())
+            self.assertTrue((staging / "1" / "map_preview" / "ABC-ID" / "ABC-ID.jpg").exists())
+            self.assertTrue((staging / "2" / "map_preview" / "DEF-ID" / "DEF-ID.jpg").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -159,7 +163,9 @@ class DjiMtpTests(unittest.TestCase):
             build_slot_sync_files([source], slots, staging)
 
             self.assertTrue((staging / "1" / "ABC-ID.kmz").exists())
+            self.assertTrue((staging / "1" / "map_preview" / "ABC-ID" / "ABC-ID.jpg").exists())
             self.assertFalse((staging / "2" / "DEF-ID.kmz").exists())
+            self.assertFalse((staging / "2" / "map_preview" / "DEF-ID" / "DEF-ID.jpg").exists())
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -180,6 +186,7 @@ class DjiMtpTests(unittest.TestCase):
                 has_image_folder=True,
                 is_calibration=False,
                 create_time_ms=1000 + index,
+                modified_at=f"2026-06-24T12:00:{index:02d}",
                 waypoint_signature=signature,
             )
             for index in range(10)
@@ -189,6 +196,9 @@ class DjiMtpTests(unittest.TestCase):
             self.assertTrue(verification.ok)
             self.assertEqual(verification.slots[0].package_name, "id-0")
             self.assertEqual(verification.slots[-1].package_name, "id-9")
+            saved_mapping = dji_mtp.load_controller_mapping("Controller A")
+            self.assertEqual(saved_mapping[0]["create_time_ms"], 1000)
+            self.assertEqual(saved_mapping[0]["modified_at"], "2026-06-24T12:00:00")
 
             dji_mtp.inspect_device_packages = lambda: [
                 DeviceFile(
@@ -197,6 +207,7 @@ class DjiMtpTests(unittest.TestCase):
                     has_image_folder=True,
                     is_calibration=False,
                     create_time_ms=1,
+                    modified_at=f"2026-06-25T12:00:{index:02d}",
                     waypoint_signature=f"changed-{index}",
                 )
                 for index in range(10)
@@ -204,6 +215,54 @@ class DjiMtpTests(unittest.TestCase):
             saved = verify_dummy_slots("Controller A")
             self.assertTrue(saved.ok)
             self.assertEqual(saved.source, "saved")
+            self.assertEqual(saved.slots[0].create_time_ms, 1)
+            self.assertEqual(saved.slots[0].modified_at, "2026-06-25T12:00:00")
+        finally:
+            dji_mtp.inspect_device_packages = original_inspect
+            dji_mtp.CONTROLLER_MAPPINGS_PATH = original_path
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_verify_dummy_slots_requires_reset_when_saved_slot_is_missing(self) -> None:
+        import scanair_dji_importer.dji_mtp as dji_mtp
+
+        original_inspect = dji_mtp.inspect_device_packages
+        original_path = dji_mtp.CONTROLLER_MAPPINGS_PATH
+        root = Path.cwd() / ".test-tmp" / "dji-missing-slot"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        dji_mtp.CONTROLLER_MAPPINGS_PATH = root / "mappings.json"
+        slots = [
+            DummySlot(
+                slot_name=str(index),
+                package_name=f"id-{index}",
+                kmz_name=f"id-{index}.kmz",
+                has_image_folder=True,
+            )
+            for index in range(1, 11)
+        ]
+        save_controller_mapping("Controller A", slots)
+        dji_mtp.inspect_device_packages = lambda: [
+            DeviceFile(
+                name=f"id-{index}.kmz",
+                package_name=f"id-{index}",
+                has_image_folder=True,
+                is_calibration=False,
+                create_time_ms=1000 + index,
+                modified_at=f"2026-06-24T12:00:{index:02d}",
+                waypoint_signature=f"changed-{index}",
+            )
+            for index in range(1, 10)
+        ]
+        try:
+            verification = verify_dummy_slots("Controller A")
+            self.assertFalse(verification.ok)
+            self.assertEqual(verification.source, "saved")
+            self.assertTrue(verification.requires_mapping_reset)
+            self.assertEqual(verification.missing, ["10"])
+
+            self.assertTrue(clear_controller_mapping("Controller A"))
+            self.assertEqual(dji_mtp.load_controller_mapping("Controller A"), [])
+            self.assertFalse(clear_controller_mapping("Controller A"))
         finally:
             dji_mtp.inspect_device_packages = original_inspect
             dji_mtp.CONTROLLER_MAPPINGS_PATH = original_path

@@ -3,7 +3,7 @@ name = "scanair-dji-importer"
 version = "0.1.0"
 description = "Desktop ScanAir cloud path sync helper for DJI RC 2."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["tkinterdnd2>=0.4.3"]
 
 [project.optional-dependencies]
 build = ["pyinstaller>=6.0"]

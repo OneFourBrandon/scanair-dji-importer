@@ -34,12 +34,296 @@ APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 CONTROLLER_MAPPINGS_PATH = APP_DIR / "controller-slot-mappings.json"
 SYNC_STAGING_DIR = APP_DIR / "sync-staging"
 INSPECT_STAGING_DIR = APP_DIR / "inspect-staging"
-BACKUPS_DIR = APP_DIR / "backups"
-BACKUP_STAGING_DIR = APP_DIR / "backup-staging"
-RESTORE_STAGING_DIR = APP_DIR / "restore-staging"
 PLACEHOLDER_JPG = bytes.fromhex(
     "ffd8ffe000104a46494600010101006000600000ffdb0043000302020302020303030304030304050805050404050a070706080c0a0c0c0b0a0b0b0d0e12100d0e110e0b0b1016101113141515150c0f171816141812141514ffdb00430103040405040509050509140d0b0d141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414ffc00011080001000103012200021101031101ffc4001400010000000000000000000000000000000000000008ffc4001410010000000000000000000000000000000000000000ffda000c03010002110311003f00b2c001ffd9"
 )
+WPD_DELETE_PS = r"""
+if (-not ("ScanAirWpdDelete" -as [type])) {
+  Add-Type @'
+using System;
+using System.Text;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+namespace ScanAirWpd {
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct PROPERTYKEY {
+        public Guid fmtid;
+        public uint pid;
+
+        public PROPERTYKEY(Guid fmtid, uint pid) {
+            this.fmtid = fmtid;
+            this.pid = pid;
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROPVARIANT {
+        public ushort vt;
+        public ushort wReserved1;
+        public ushort wReserved2;
+        public ushort wReserved3;
+        public IntPtr p;
+        public int p2;
+    }
+
+    [ComImport, Guid("a1567595-4c2f-4574-a6fa-ecef917b9a40"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDeviceManager {
+        [PreserveSig] int GetDevices(
+            [In, Out, MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 1)] string[] pPnPDeviceIDs,
+            ref uint pcPnPDeviceIDs);
+        [PreserveSig] int RefreshDeviceList();
+        [PreserveSig] int GetDeviceFriendlyName([MarshalAs(UnmanagedType.LPWStr)] string pszPnPDeviceID, [Out] StringBuilder pDeviceFriendlyName, ref uint pcchDeviceFriendlyName);
+        [PreserveSig] int GetDeviceDescription([MarshalAs(UnmanagedType.LPWStr)] string pszPnPDeviceID, [Out] StringBuilder pDeviceDescription, ref uint pcchDeviceDescription);
+        [PreserveSig] int GetDeviceManufacturer([MarshalAs(UnmanagedType.LPWStr)] string pszPnPDeviceID, [Out] StringBuilder pDeviceManufacturer, ref uint pcchDeviceManufacturer);
+        [PreserveSig] int GetDeviceProperty([MarshalAs(UnmanagedType.LPWStr)] string pszPnPDeviceID, [MarshalAs(UnmanagedType.LPWStr)] string pszDevicePropertyName, IntPtr pData, ref uint pcbData, ref uint pdwType);
+        [PreserveSig] int GetPrivateDevices(
+            [In, Out, MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 1)] string[] pPnPDeviceIDs,
+            ref uint pcPnPDeviceIDs);
+    }
+
+    [ComImport, Guid("625e2df8-6392-4cf0-9ad1-3cfa5f17775c"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDevice {
+        [PreserveSig] int Open([MarshalAs(UnmanagedType.LPWStr)] string pszPnPDeviceID, IPortableDeviceValues pClientInfo);
+        [PreserveSig] int SendCommand(uint dwFlags, IPortableDeviceValues pParameters, out IPortableDeviceValues ppResults);
+        [PreserveSig] int Content(out IPortableDeviceContent ppContent);
+        [PreserveSig] int Capabilities(out IntPtr ppCapabilities);
+        [PreserveSig] int Cancel();
+        [PreserveSig] int Close();
+        [PreserveSig] int Advise(uint dwFlags, IntPtr pCallback, IPortableDeviceValues pParameters, out IntPtr ppszCookie);
+        [PreserveSig] int Unadvise([MarshalAs(UnmanagedType.LPWStr)] string pszCookie);
+        [PreserveSig] int GetPnPDeviceID([MarshalAs(UnmanagedType.LPWStr)] out string ppszPnPDeviceID);
+    }
+
+    [ComImport, Guid("6a96ed84-7c73-4480-9938-bf5af477d426"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDeviceContent {
+        [PreserveSig] int EnumObjects(uint dwFlags, [MarshalAs(UnmanagedType.LPWStr)] string pszParentObjectID, IPortableDeviceValues pFilter, out IEnumPortableDeviceObjectIDs ppEnum);
+        [PreserveSig] int Properties(out IPortableDeviceProperties ppProperties);
+        [PreserveSig] int Transfer(out IntPtr ppResources);
+        [PreserveSig] int CreateObjectWithPropertiesOnly(IPortableDeviceValues pValues, ref IntPtr ppszObjectID);
+        [PreserveSig] int CreateObjectWithPropertiesAndData(IPortableDeviceValues pValues, out IntPtr ppData, ref uint pdwOptimalWriteBufferSize, ref IntPtr ppszCookie);
+        [PreserveSig] int Delete(uint dwOptions, IPortableDevicePropVariantCollection pObjectIDs, out IPortableDevicePropVariantCollection ppResults);
+        [PreserveSig] int GetObjectIDsFromPersistentUniqueIDs(IPortableDevicePropVariantCollection pPersistentUniqueIDs, out IPortableDevicePropVariantCollection ppObjectIDs);
+        [PreserveSig] int Cancel();
+        [PreserveSig] int Move(IPortableDevicePropVariantCollection pObjectIDs, [MarshalAs(UnmanagedType.LPWStr)] string pszDestinationFolderObjectID, out IPortableDevicePropVariantCollection ppResults);
+        [PreserveSig] int Copy(IPortableDevicePropVariantCollection pObjectIDs, [MarshalAs(UnmanagedType.LPWStr)] string pszDestinationFolderObjectID, out IPortableDevicePropVariantCollection ppResults);
+    }
+
+    [ComImport, Guid("10ece955-cf41-4728-bfa0-41eedf1bbf19"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IEnumPortableDeviceObjectIDs {
+        [PreserveSig] int Next(uint cObjects, [Out, MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.LPWStr, SizeParamIndex = 0)] string[] pObjIDs, ref uint pcFetched);
+        [PreserveSig] int Skip(uint cObjects);
+        [PreserveSig] int Reset();
+        [PreserveSig] int Clone(out IEnumPortableDeviceObjectIDs ppEnum);
+        [PreserveSig] int Cancel();
+    }
+
+    [ComImport, Guid("7f6d695c-03df-4439-a809-59266beee3a6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDeviceProperties {
+        [PreserveSig] int GetSupportedProperties([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, out IPortableDeviceKeyCollection ppKeys);
+        [PreserveSig] int GetPropertyAttributes([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, ref PROPERTYKEY Key, out IPortableDeviceValues ppAttributes);
+        [PreserveSig] int GetValues([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, IPortableDeviceKeyCollection pKeys, out IPortableDeviceValues ppValues);
+        [PreserveSig] int SetValues([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, IPortableDeviceValues pValues, out IPortableDeviceValues ppResults);
+        [PreserveSig] int Delete([MarshalAs(UnmanagedType.LPWStr)] string pszObjectID, IPortableDeviceKeyCollection pKeys);
+        [PreserveSig] int Cancel();
+    }
+
+    [ComImport, Guid("6848f6f2-3155-4f86-b6f5-263eeeab3143"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDeviceValues {
+        [PreserveSig] int GetCount(ref uint pcelt);
+        [PreserveSig] int GetAt(uint index, ref PROPERTYKEY pKey, ref PROPVARIANT pValue);
+        [PreserveSig] int SetValue(ref PROPERTYKEY key, ref PROPVARIANT pValue);
+        [PreserveSig] int GetValue(ref PROPERTYKEY key, ref PROPVARIANT pValue);
+        [PreserveSig] int SetStringValue(ref PROPERTYKEY key, [MarshalAs(UnmanagedType.LPWStr)] string Value);
+        [PreserveSig] int GetStringValue(ref PROPERTYKEY key, [MarshalAs(UnmanagedType.LPWStr)] out string pValue);
+        [PreserveSig] int SetUnsignedIntegerValue(ref PROPERTYKEY key, uint Value);
+        [PreserveSig] int GetUnsignedIntegerValue(ref PROPERTYKEY key, ref uint pValue);
+    }
+
+    [ComImport, Guid("dada2357-e0ad-492e-98db-dd61c53ba353"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDeviceKeyCollection {
+        [PreserveSig] int GetCount(ref uint pcElems);
+        [PreserveSig] int GetAt(uint dwIndex, ref PROPERTYKEY pKey);
+        [PreserveSig] int Add(ref PROPERTYKEY Key);
+        [PreserveSig] int Clear();
+        [PreserveSig] int RemoveAt(uint dwIndex);
+    }
+
+    [ComImport, Guid("89b2e422-4f1b-4316-bcef-a44afea83eb3"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPortableDevicePropVariantCollection {
+        [PreserveSig] int GetCount(ref uint pcElems);
+        [PreserveSig] int GetAt(uint dwIndex, ref PROPVARIANT pValue);
+        [PreserveSig] int Add(ref PROPVARIANT pValue);
+        [PreserveSig] int GetType(ref ushort pvt);
+        [PreserveSig] int ChangeType(ushort vt);
+        [PreserveSig] int Clear();
+        [PreserveSig] int RemoveAt(uint dwIndex);
+    }
+
+    public static class ScanAirWpdDelete {
+        private const uint PORTABLE_DEVICE_DELETE_WITH_RECURSION = 1;
+        private const ushort VT_LPWSTR = 31;
+        private static readonly Guid CLSID_PortableDeviceManager = new Guid("0af10cec-2ecd-4b92-9581-34f6ae0637f3");
+        private static readonly Guid CLSID_PortableDevice = new Guid("728a21c5-3d9e-48d7-9810-864848f0f404");
+        private static readonly Guid CLSID_PortableDeviceValues = new Guid("0c15d503-d017-47ce-9016-7b3f978721cc");
+        private static readonly Guid CLSID_PortableDeviceKeyCollection = new Guid("de2d022d-2480-43be-97f0-d1fa2cf98f4f");
+        private static readonly Guid CLSID_PortableDevicePropVariantCollection = new Guid("08a99e2f-6d6d-4b80-af5a-baf2bcbe4cb9");
+        private static readonly Guid WPD_OBJECT_PROPERTIES_V1 = new Guid("EF6B490D-5CD8-437A-AFFC-DA8B60EE4A3C");
+        private static readonly PROPERTYKEY WPD_OBJECT_NAME = new PROPERTYKEY(WPD_OBJECT_PROPERTIES_V1, 4);
+        private static readonly PROPERTYKEY WPD_OBJECT_ORIGINAL_FILE_NAME = new PROPERTYKEY(WPD_OBJECT_PROPERTIES_V1, 12);
+
+        public static void DeletePath(string deviceFriendlyName, string[] pathParts) {
+            if (pathParts == null || pathParts.Length == 0) {
+                throw new ArgumentException("WPD delete path is empty.");
+            }
+            object deviceCom = null;
+            IPortableDevice device = null;
+            try {
+                string deviceId = FindDeviceId(deviceFriendlyName);
+                deviceCom = Activator.CreateInstance(Type.GetTypeFromCLSID(CLSID_PortableDevice));
+                device = (IPortableDevice)deviceCom;
+                IPortableDeviceValues clientInfo = CreateCom<IPortableDeviceValues>(CLSID_PortableDeviceValues);
+                Check(device.Open(deviceId, clientInfo), "Open portable device");
+                IPortableDeviceContent content;
+                Check(device.Content(out content), "Open portable device content");
+                IPortableDeviceProperties properties;
+                Check(content.Properties(out properties), "Open portable device properties");
+                string objectId = ResolvePath(content, properties, pathParts);
+                IPortableDevicePropVariantCollection objectIds = CreateCom<IPortableDevicePropVariantCollection>(CLSID_PortableDevicePropVariantCollection);
+                PROPVARIANT value = PropVariantFromString(objectId);
+                try {
+                    Check(objectIds.Add(ref value), "Add WPD object ID to delete collection");
+                } finally {
+                    PropVariantClear(ref value);
+                }
+                IPortableDevicePropVariantCollection results;
+                Check(content.Delete(PORTABLE_DEVICE_DELETE_WITH_RECURSION, objectIds, out results), "Delete WPD object");
+            } finally {
+                if (device != null) {
+                    device.Close();
+                }
+                if (deviceCom != null) {
+                    Marshal.ReleaseComObject(deviceCom);
+                }
+            }
+        }
+
+        private static string FindDeviceId(string deviceFriendlyName) {
+            IPortableDeviceManager manager = CreateCom<IPortableDeviceManager>(CLSID_PortableDeviceManager);
+            Check(manager.RefreshDeviceList(), "Refresh portable device list");
+            uint count = 0;
+            Check(manager.GetDevices(null, ref count), "Count portable devices");
+            if (count == 0) {
+                throw new InvalidOperationException("No portable devices are connected.");
+            }
+            string[] deviceIds = new string[count];
+            Check(manager.GetDevices(deviceIds, ref count), "List portable devices");
+            foreach (string deviceId in deviceIds) {
+                string friendlyName = GetFriendlyName(manager, deviceId);
+                if (NamesMatch(friendlyName, deviceFriendlyName) || friendlyName.IndexOf(deviceFriendlyName, StringComparison.OrdinalIgnoreCase) >= 0) {
+                    return deviceId;
+                }
+            }
+            throw new InvalidOperationException("Could not find WPD device: " + deviceFriendlyName);
+        }
+
+        private static string GetFriendlyName(IPortableDeviceManager manager, string deviceId) {
+            uint length = 0;
+            manager.GetDeviceFriendlyName(deviceId, null, ref length);
+            if (length == 0) {
+                return "";
+            }
+            StringBuilder builder = new StringBuilder((int)length);
+            Check(manager.GetDeviceFriendlyName(deviceId, builder, ref length), "Get portable device friendly name");
+            return builder.ToString();
+        }
+
+        private static string ResolvePath(IPortableDeviceContent content, IPortableDeviceProperties properties, string[] pathParts) {
+            string parentId = "DEVICE";
+            foreach (string part in pathParts) {
+                string childId = FindChildObjectId(content, properties, parentId, part);
+                if (String.IsNullOrEmpty(childId)) {
+                    throw new InvalidOperationException("Could not find WPD object path part: " + part);
+                }
+                parentId = childId;
+            }
+            return parentId;
+        }
+
+        private static string FindChildObjectId(IPortableDeviceContent content, IPortableDeviceProperties properties, string parentId, string expectedName) {
+            IEnumPortableDeviceObjectIDs enumerator;
+            Check(content.EnumObjects(0, parentId, null, out enumerator), "Enumerate WPD objects");
+            while (true) {
+                string[] objectIds = new string[16];
+                uint fetched = 0;
+                int hr = enumerator.Next((uint)objectIds.Length, objectIds, ref fetched);
+                if (hr != 0 && hr != 1) {
+                    Check(hr, "Read WPD object IDs");
+                }
+                if (fetched == 0) {
+                    break;
+                }
+                for (int index = 0; index < fetched; index++) {
+                    string objectId = objectIds[index];
+                    foreach (string objectName in GetObjectNames(properties, objectId)) {
+                        if (NamesMatch(objectName, expectedName)) {
+                            return objectId;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static IEnumerable<string> GetObjectNames(IPortableDeviceProperties properties, string objectId) {
+            IPortableDeviceKeyCollection keys = CreateCom<IPortableDeviceKeyCollection>(CLSID_PortableDeviceKeyCollection);
+            PROPERTYKEY nameKey = WPD_OBJECT_NAME;
+            PROPERTYKEY originalNameKey = WPD_OBJECT_ORIGINAL_FILE_NAME;
+            keys.Add(ref nameKey);
+            keys.Add(ref originalNameKey);
+            IPortableDeviceValues values;
+            Check(properties.GetValues(objectId, keys, out values), "Read WPD object properties");
+            string value;
+            if (values.GetStringValue(ref nameKey, out value) == 0 && !String.IsNullOrEmpty(value)) {
+                yield return value;
+            }
+            if (values.GetStringValue(ref originalNameKey, out value) == 0 && !String.IsNullOrEmpty(value)) {
+                yield return value;
+            }
+        }
+
+        private static bool NamesMatch(string actual, string expected) {
+            return String.Equals((actual ?? "").Trim(), (expected ?? "").Trim(), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static T CreateCom<T>(Guid clsid) {
+            return (T)Activator.CreateInstance(Type.GetTypeFromCLSID(clsid));
+        }
+
+        private static PROPVARIANT PropVariantFromString(string value) {
+            PROPVARIANT variant = new PROPVARIANT();
+            variant.vt = VT_LPWSTR;
+            variant.p = Marshal.StringToCoTaskMemUni(value);
+            return variant;
+        }
+
+        private static void Check(int hr, string operation) {
+            if (hr < 0) {
+                Marshal.ThrowExceptionForHR(hr);
+            }
+        }
+
+        [DllImport("Ole32.dll")]
+        private static extern int PropVariantClear(ref PROPVARIANT pvar);
+    }
+}
+'@
+}
+
+function Remove-WpdDeviceObject($pathParts) {
+  [ScanAirWpd.ScanAirWpdDelete]::DeletePath($script:DeviceName, [string[]]$pathParts)
+}
+"""
 
 
 class DjiControllerError(RuntimeError):
@@ -55,6 +339,7 @@ class DeviceFile:
     mission_name: str | None = None
     package_name_matches_kmz: bool = False
     create_time_ms: int | None = None
+    modified_at: str | None = None
     waypoint_signature: str | None = None
 
 
@@ -67,18 +352,14 @@ class SyncResult:
 
 
 @dataclass(frozen=True)
-class RestoreResult:
-    deleted: list[str]
-    restored: list[str]
-
-
-@dataclass(frozen=True)
 class DummySlot:
     slot_name: str
     package_name: str
     kmz_name: str
     has_image_folder: bool
     local_name: str | None = None
+    create_time_ms: int | None = None
+    modified_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +380,7 @@ class DummySlotVerification:
     controller_key: str = "Default"
     controller_label: str = DEVICE_NAME
     source: str = "detected"
+    requires_mapping_reset: bool = False
 
     @property
     def message(self) -> str:
@@ -106,6 +388,16 @@ class DummySlotVerification:
             if self.source == "saved":
                 return f"Using saved dummy slot mapping for {self.controller_label}."
             return f"Detected and saved 10 duplicate dummy missions for {self.controller_label}."
+        if self.requires_mapping_reset:
+            return "\n".join(
+                [
+                    f"One or more remembered dummy slot IDs are missing from {self.controller_label}.",
+                    "Missing saved slot IDs: " + ", ".join(self.missing),
+                    "The saved slot memory for this controller must be reset.",
+                    "Delete any remaining old dummy missions on the DJI RC 2, then create one dummy waypoint mission and use Save As / duplicate until there are 10 identical copies.",
+                    "Click Check Controller after the 10 new dummy missions exist so the app can save the new slot IDs.",
+                ]
+            )
         parts = [
             "Create one dummy waypoint mission on the DJI RC 2 with at least 2 waypoints.",
             "Then use DJI Fly's Save As / duplicate workflow until there are 10 identical copies of that same path.",
@@ -346,6 +638,8 @@ def verify_dummy_slots(controller_key: str | None = None) -> DummySlotVerificati
                     kmz_name=item["kmz_name"],
                     has_image_folder=current.has_image_folder,
                     local_name=item.get("local_name"),
+                    create_time_ms=current.create_time_ms,
+                    modified_at=current.modified_at or item.get("modified_at"),
                 )
             )
         if not missing and len(slots) == len(REQUIRED_DUMMY_NAMES):
@@ -359,6 +653,17 @@ def verify_dummy_slots(controller_key: str | None = None) -> DummySlotVerificati
                 controller_label=controller_label,
                 source="saved",
             )
+        return DummySlotVerification(
+            ok=False,
+            slots=slots,
+            missing=missing,
+            duplicates=[],
+            detected=[],
+            controller_key=mapping_key,
+            controller_label=controller_label,
+            source="saved",
+            requires_mapping_reset=True,
+        )
 
     groups: dict[str, list[DeviceFile]] = {}
     for file in files:
@@ -389,6 +694,8 @@ def verify_dummy_slots(controller_key: str | None = None) -> DummySlotVerificati
             kmz_name=file.name,
             has_image_folder=file.has_image_folder,
             local_name=None,
+            create_time_ms=file.create_time_ms,
+            modified_at=file.modified_at,
         )
         for index, file in enumerate(selected_group, start=1)
     ]
@@ -423,6 +730,15 @@ def load_controller_mapping(controller_key: str) -> list[dict]:
     return slots if isinstance(slots, list) else []
 
 
+def clear_controller_mapping(controller_key: str) -> bool:
+    data = read_controller_mappings()
+    if controller_key not in data:
+        return False
+    del data[controller_key]
+    write_controller_mappings(data)
+    return True
+
+
 def get_controller_slot_mapping() -> tuple[ControllerIdentity, list[dict]]:
     identity = get_controller_identity()
     return identity, load_controller_mapping(identity.key)
@@ -444,6 +760,8 @@ def update_controller_slot_mapping(slots: list[dict]) -> ControllerIdentity:
                 "package_name": package_name,
                 "kmz_name": kmz_name,
                 "local_name": str(slot.get("local_name") or "").strip(),
+                "create_time_ms": slot.get("create_time_ms"),
+                "modified_at": str(slot.get("modified_at") or "").strip(),
             }
         )
     data = read_controller_mappings()
@@ -473,6 +791,8 @@ def save_controller_mapping(controller_key: str, slots: list[DummySlot], identit
                 "package_name": slot.package_name,
                 "kmz_name": slot.kmz_name,
                 "local_name": slot.local_name or "",
+                "create_time_ms": slot.create_time_ms,
+                "modified_at": slot.modified_at or "",
             }
             for slot in sorted(slots, key=lambda item: int(item.slot_name))
         ],
@@ -518,11 +838,16 @@ foreach ($item in @($folder.Items())) {{
       $localFolder.CopyHere($kmz, 16)
       $localKmz = Wait-ForLocalChild $localDir $kmz.Name
     }}
+    $modifiedAt = $null
+    if ($null -ne $kmz -and $null -ne $kmz.ModifyDate) {{
+      try {{ $modifiedAt = ([datetime]$kmz.ModifyDate).ToString("o") }} catch {{ $modifiedAt = [string]$kmz.ModifyDate }}
+    }}
     $items += [pscustomobject]@{{
       name = if ($null -ne $kmz) {{ $kmz.Name }} else {{ $null }}
       package_name = $item.Name
       has_image_folder = ($null -ne (Find-Child $package "image"))
       local_kmz_path = $localKmz
+      modified_at = $modifiedAt
       loose = $false
     }}
     $index += 1
@@ -534,11 +859,16 @@ foreach ($item in @($folder.Items())) {{
     $localFolder = (New-Object -ComObject Shell.Application).Namespace($localDir)
     $localFolder.CopyHere($item, 16)
     $localKmz = Wait-ForLocalChild $localDir $item.Name
+    $modifiedAt = $null
+    if ($null -ne $item.ModifyDate) {{
+      try {{ $modifiedAt = ([datetime]$item.ModifyDate).ToString("o") }} catch {{ $modifiedAt = [string]$item.ModifyDate }}
+    }}
     $items += [pscustomobject]@{{
       name = $item.Name
       package_name = $null
       has_image_folder = $false
       local_kmz_path = $localKmz
+      modified_at = $modifiedAt
       loose = $true
     }}
     $index += 1
@@ -576,6 +906,7 @@ Write-Json $items
                     has_image_folder=bool(item.get("has_image_folder")),
                     mission_name=mission_name,
                     create_time_ms=extract_kmz_create_time_ms(Path(local_path)) if local_path else None,
+                    modified_at=str(item.get("modified_at") or "") or None,
                     waypoint_signature=extract_kmz_waypoint_signature(Path(local_path)) if local_path else None,
                     package_name_matches_kmz=package_matches,
                     is_calibration=(
@@ -612,31 +943,38 @@ def sync_files(files: list[Path], controller_key: str | None = None) -> SyncResu
                 "package_name": slot.package_name,
                 "kmz_name": slot.kmz_name,
                 "kmz_path": str((staging_root / slot.slot_name / slot.kmz_name).resolve()),
+                "preview_dir": str((staging_root / slot.slot_name / "map_preview" / slot.package_name).resolve()),
+                "preview_name": f"{slot.package_name}.jpg",
+                "preview_path": str(
+                    (staging_root / slot.slot_name / "map_preview" / slot.package_name / f"{slot.package_name}.jpg").resolve()
+                ),
             }
             for slot in active_slots
         ]
     )
-    script = _ps_common() + f"""
+    script = _ps_common() + WPD_DELETE_PS + f"""
 $slotPayloads = ConvertFrom-Json @'
 {slot_payloads}
 '@
 $folder = Get-WaypointFolder
+$previewRoot = Find-Child $folder "map_preview"
+$previewRootFolder = if ($null -ne $previewRoot -and $previewRoot.IsFolder) {{ $previewRoot.GetFolder }} else {{ $null }}
 $copied = @()
 $skipped = @()
 $copyFlags = 4 + 16 + 512 + 1024
 
-function Remove-ExistingChild($folderObject, $name) {{
+function Remove-ExistingChild($folderObject, $name, $pathParts) {{
   $existing = Find-Child $folderObject $name
   if ($null -eq $existing) {{
     return
   }}
-  $existing.InvokeVerb("delete")
+  Remove-WpdDeviceObject $pathParts
   if (-not (Wait-ForMissingChild $folderObject $name)) {{
     throw "Windows did not delete existing controller file before replacement: $name"
   }}
 }}
 
-foreach ($slot in @($slotPayloads)) {{
+foreach ($slot in @($slotPayloads | Sort-Object {{ [int]$_.slot_name }} -Descending)) {{
   $package = Find-Child $folder $slot.package_name
   if ($null -eq $package -or -not $package.IsFolder) {{
     throw "Dummy mission folder disappeared from controller: $($slot.package_name)"
@@ -646,9 +984,25 @@ foreach ($slot in @($slotPayloads)) {{
   if ($null -eq $image -or -not $image.IsFolder) {{
     throw "Dummy mission $($slot.slot_name) is missing its image folder. Recreate that dummy mission in DJI Fly."
   }}
-  Remove-ExistingChild $packageFolder $slot.kmz_name
+  Remove-ExistingChild $packageFolder $slot.kmz_name @($script:WaypointParts + $slot.package_name + $slot.kmz_name)
   $packageFolder.CopyHere($slot.kmz_path, $copyFlags)
   Wait-ForChild $packageFolder $slot.kmz_name | Out-Null
+  if ($null -ne $previewRootFolder) {{
+    $previewPackage = Find-Child $previewRootFolder $slot.package_name
+    if ($null -eq $previewPackage) {{
+      $previewRootFolder.CopyHere($slot.preview_dir, $copyFlags)
+      Wait-ForChild $previewRootFolder $slot.package_name | Out-Null
+    }} elseif ($previewPackage.IsFolder) {{
+      $previewPackageFolder = $previewPackage.GetFolder
+      Remove-ExistingChild $previewPackageFolder $slot.preview_name @($script:WaypointParts + "map_preview" + $slot.package_name + $slot.preview_name)
+      $previewPackageFolder.CopyHere($slot.preview_path, $copyFlags)
+      Wait-ForChild $previewPackageFolder $slot.preview_name | Out-Null
+    }} else {{
+      $skipped += "thumbnail:$($slot.slot_name)"
+    }}
+  }} else {{
+    $skipped += "thumbnail:$($slot.slot_name)"
+  }}
   $copied += $slot.slot_name
 }}
 Write-Json ([pscustomobject]@{{ deleted = @(); copied = $copied; preserved = @(); skipped = $skipped }})
@@ -695,14 +1049,22 @@ def build_slot_sync_files(files: list[Path], slots: list[DummySlot], staging_dir
     if staging_dir.exists():
         shutil.rmtree(staging_dir)
     staging_dir.mkdir(parents=True, exist_ok=True)
-    for index, slot in enumerate(sorted(slots, key=lambda item: int(item.slot_name))):
+    ordered_slots = sorted(slots, key=lambda item: int(item.slot_name))
+    active_count = min(len(files), len(ordered_slots))
+    timestamp_base = time.time() - MTP_MODIFIED_TIME_COMPENSATION_SECONDS
+    for index, slot in enumerate(ordered_slots):
         slot_dir = staging_dir / slot.slot_name
         slot_dir.mkdir(parents=True, exist_ok=True)
         if index >= len(files):
             break
         kmz_path = slot_dir / slot.kmz_name
+        preview_dir = slot_dir / "map_preview" / slot.package_name
+        preview_path = preview_dir / f"{slot.package_name}.jpg"
+        preview_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(files[index], kmz_path)
-        apply_mtp_modified_time(kmz_path)
+        write_numbered_preview_jpg(preview_path, slot.slot_name)
+        display_timestamp = timestamp_base + (active_count - index)
+        apply_mtp_modified_time(kmz_path, preview_path, timestamp=display_timestamp)
     return staging_dir
 
 
@@ -799,8 +1161,9 @@ def zip_info_for(name: str, timestamp_ms: int | None = None) -> ZipInfo:
     return info
 
 
-def apply_mtp_modified_time(*paths: Path) -> None:
-    timestamp = time.time() - MTP_MODIFIED_TIME_COMPENSATION_SECONDS
+def apply_mtp_modified_time(*paths: Path, timestamp: float | None = None) -> None:
+    if timestamp is None:
+        timestamp = time.time() - MTP_MODIFIED_TIME_COMPENSATION_SECONDS
     for path in paths:
         os.utime(path, (timestamp, timestamp))
 
@@ -912,94 +1275,6 @@ def build_dummy_waylines_wpml(mission_name: str, timestamp_ms: int) -> str:
 '''
 
 
-def create_waypoint_backup() -> Path:
-    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    if BACKUP_STAGING_DIR.exists():
-        shutil.rmtree(BACKUP_STAGING_DIR)
-    waypoint_staging = BACKUP_STAGING_DIR / "waypoint"
-    waypoint_staging.mkdir(parents=True, exist_ok=True)
-    backup_name = f"dji-waypoint-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
-    backup_path = BACKUPS_DIR / backup_name
-    _run_ps(
-        _ps_common()
-        + f"""
-$backupTarget = ConvertFrom-Json @'
-{json.dumps(str(waypoint_staging))}
-'@
-New-Item -ItemType Directory -Force -Path $backupTarget | Out-Null
-$targetFolder = (New-Object -ComObject Shell.Application).Namespace($backupTarget)
-$folder = Get-WaypointFolder
-$copied = @()
-foreach ($item in @($folder.Items())) {{
-  $targetFolder.CopyHere($item, 16)
-  $copied += $item.Name
-  Wait-ForLocalChild $backupTarget $item.Name | Out-Null
-}}
-Write-Json ([pscustomobject]@{{ copied = $copied }})
-"""
-    )
-    try:
-        with ZipFile(backup_path, mode="w", compression=ZIP_DEFLATED) as archive:
-            for path in sorted(BACKUP_STAGING_DIR.rglob("*")):
-                if path.is_file():
-                    archive.write(path, path.relative_to(BACKUP_STAGING_DIR))
-        return backup_path
-    finally:
-        shutil.rmtree(BACKUP_STAGING_DIR, ignore_errors=True)
-
-
-def list_backup_files() -> list[Path]:
-    BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
-    return sorted(BACKUPS_DIR.glob("*.zip"), key=lambda path: path.stat().st_mtime, reverse=True)
-
-
-def restore_waypoint_backup(backup_path: Path) -> RestoreResult:
-    if not backup_path.exists():
-        raise DjiControllerError(f"Backup does not exist: {backup_path}")
-    if RESTORE_STAGING_DIR.exists():
-        shutil.rmtree(RESTORE_STAGING_DIR)
-    RESTORE_STAGING_DIR.mkdir(parents=True, exist_ok=True)
-    with ZipFile(backup_path) as archive:
-        archive.extractall(RESTORE_STAGING_DIR)
-    source = RESTORE_STAGING_DIR / "waypoint"
-    if not source.exists():
-        source = RESTORE_STAGING_DIR
-    payload = _run_ps(
-        _ps_common()
-        + f"""
-$restoreSource = ConvertFrom-Json @'
-{json.dumps(str(source))}
-'@
-if (-not (Test-Path -LiteralPath $restoreSource -PathType Container)) {{
-  throw "Backup restore source folder was not found: $restoreSource"
-}}
-$shell = New-Object -ComObject Shell.Application
-$sourceFolder = $shell.Namespace($restoreSource)
-$folder = Get-WaypointFolder
-$deleted = @()
-foreach ($item in @($folder.Items())) {{
-  $deleted += $item.Name
-  $item.InvokeVerb("delete")
-  if (-not (Wait-ForMissingChild $folder $item.Name)) {{
-    throw "Windows did not delete waypoint item during restore: $($item.Name)"
-  }}
-}}
-$restored = @()
-foreach ($item in @($sourceFolder.Items())) {{
-  $folder.CopyHere($item.Path, 16)
-  $restored += $item.Name
-  Start-Sleep -Milliseconds 1000
-}}
-Write-Json ([pscustomobject]@{{ deleted = $deleted; restored = $restored }})
-"""
-    )
-    try:
-        data = json.loads(payload)
-        return RestoreResult(deleted=json_list(data.get("deleted")), restored=json_list(data.get("restored")))
-    finally:
-        shutil.rmtree(RESTORE_STAGING_DIR, ignore_errors=True)
-
-
 def json_list(value) -> list[str]:
     if value is None:
         return []
@@ -1008,16 +1283,21 @@ def json_list(value) -> list[str]:
     return [str(value)]
 
 
-def _run_ps(script: str) -> str:
+def _run_ps(script: str, *, hide_window: bool = True) -> str:
     with tempfile.NamedTemporaryFile("w", suffix=".ps1", encoding="utf-8", delete=False) as handle:
         handle.write(script)
         script_path = Path(handle.name)
     completed: subprocess.CompletedProcess[str] | None = None
+    creationflags = 0
+    if hide_window and os.name == "nt":
+        creationflags = subprocess.CREATE_NO_WINDOW
     try:
         completed = subprocess.run(
             [
                 "powershell",
                 "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
@@ -1027,6 +1307,7 @@ def _run_ps(script: str) -> str:
             text=True,
             timeout=180,
             check=False,
+            creationflags=creationflags,
         )
     finally:
         try:

@@ -1,9 +1,12 @@
 import json
 import threading
 import unittest
+from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse
+from zipfile import ZipFile
 
-from scanair_dji_importer.creator_client import CreatorClient, filename_from_headers
+from scanair_dji_importer.creator_client import CreatorApiError, CreatorClient
 
 
 class CreatorClientTests(unittest.TestCase):
@@ -12,12 +15,17 @@ class CreatorClientTests(unittest.TestCase):
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            client = CreatorClient(f"http://127.0.0.1:{server.server_port}", "token")
+            client = CreatorClient(
+                f"http://127.0.0.1:{server.server_port}",
+                "token",
+            )
             projects = client.list_projects()
 
             self.assertEqual(projects[0].name, "Roof A")
             self.assertEqual(projects[0].paths[0].name, "North Grid")
-            self.assertTrue(projects[0].paths[0].has_mission_area)
+            self.assertTrue(projects[0].paths[0].has_saved_mission)
+            self.assertEqual(projects[0].paths[0].export_part_count, 1)
+            self.assertEqual(projects[0].paths[1].export_part_count, 2)
 
             package = client.download_path_kmz("project-1", "path-1")
             self.assertEqual(package.filename, "Roof-A-North-Grid.kmz")
@@ -26,60 +34,121 @@ class CreatorClientTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def test_filename_from_headers_allows_unquoted_filename(self) -> None:
-        from email.message import Message
+    def test_auth_error_keeps_status_code(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = CreatorClient(
+                f"http://127.0.0.1:{server.server_port}",
+                "expired-token",
+            )
+            with self.assertRaises(CreatorApiError) as raised:
+                client.list_projects()
 
-        headers = Message()
-        headers["Content-Disposition"] = "attachment; filename=scanair.kmz"
-        self.assertEqual(filename_from_headers(headers), "scanair.kmz")
+            self.assertEqual(raised.exception.status_code, 401)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_download_path_kmz_files_unpacks_split_zip(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = CreatorClient(
+                f"http://127.0.0.1:{server.server_port}",
+                "token",
+            )
+
+            packages = client.download_path_kmz_files("project-1", "path-2")
+
+            self.assertEqual([package.filename for package in packages], ["part-01.kmz", "part-02.kmz"])
+            self.assertEqual([package.payload for package in packages], [b"kmz-one", b"kmz-two"])
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        self.assert_auth()
-        if self.path != "/projects":
+        if not self.assert_auth():
+            return
+        parsed = urlparse(self.path)
+        if parsed.path == "/projects":
+            payload = [
+                {
+                    "project_id": "project-1",
+                    "name": "Roof A",
+                    "updated_at": "2026-05-29T12:00:00Z",
+                }
+            ]
+        elif parsed.path == "/projects/project-1/paths":
+            payload = [
+                {
+                    "project_id": "project-1",
+                    "path_id": "path-1",
+                    "name": "North Grid",
+                    "updated_at": "2026-05-29T12:00:00Z",
+                    "has_mission_area": True,
+                    "has_saved_mission": True,
+                    "export_part_count": 1,
+                },
+                {
+                    "project_id": "project-1",
+                    "path_id": "path-2",
+                    "name": "Long Grid",
+                    "updated_at": "2026-05-29T12:05:00Z",
+                    "has_mission_area": True,
+                    "has_saved_mission": True,
+                    "export_part_count": 2,
+                }
+            ]
+        else:
             self.send_error(404)
             return
-        payload = [
-            {
-                "project_id": "project-1",
-                "name": "Roof A",
-                "updated_at": "2026-05-29T12:00:00Z",
-                "payload": {
-                    "paths": [
-                        {
-                            "id": "path-1",
-                            "name": "North Grid",
-                            "polygon": {"type": "Polygon", "coordinates": []},
-                            "settings": {"scanType": "grid"},
-                            "updatedAt": 123,
-                        }
-                    ]
-                },
-            }
-        ]
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(payload).encode("utf-8"))
 
     def do_POST(self) -> None:
-        self.assert_auth()
-        if self.path != "/projects/project-1/paths/path-1/exports/kmz?auto_record_video=true&record_grid_passes=false&ignore_waypoint_limit=false":
-            self.send_error(404)
+        if not self.assert_auth():
             return
-        self.send_response(200)
-        self.send_header("Content-Type", "application/vnd.google-earth.kmz")
-        self.send_header("Content-Disposition", 'attachment; filename="Roof-A-North-Grid.kmz"')
-        self.end_headers()
-        self.wfile.write(b"kmz-data")
+        parsed = urlparse(self.path)
+        if parsed.path != "/projects/project-1/paths/path-1/exports/kmz":
+            if parsed.path != "/projects/project-1/paths/path-2/exports/kmz":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="Roof-A-Split.zip"')
+            self.end_headers()
+            self.wfile.write(_split_zip_payload())
+            return
+        else:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.google-earth.kmz")
+            self.send_header("Content-Disposition", 'attachment; filename="Roof-A-North-Grid.kmz"')
+            self.end_headers()
+            self.wfile.write(b"kmz-data")
 
-    def assert_auth(self) -> None:
+    def assert_auth(self) -> bool:
         if self.headers.get("Authorization") != "Bearer token":
             self.send_error(401)
+            return False
+        return True
 
     def log_message(self, _format: str, *_args: object) -> None:
         return
+
+
+def _split_zip_payload() -> bytes:
+    buffer = BytesIO()
+    with ZipFile(buffer, mode="w") as archive:
+        archive.writestr("part-01.kmz", b"kmz-one")
+        archive.writestr("part-02.kmz", b"kmz-two")
+    return buffer.getvalue()
 
 
 if __name__ == "__main__":

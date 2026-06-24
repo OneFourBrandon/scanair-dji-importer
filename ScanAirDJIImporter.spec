@@ -1,17 +1,22 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+
 block_cipher = None
 
+tkinterdnd2_datas = collect_data_files("tkinterdnd2")
 app_datas = [
     ("scanair_dji_importer/assets/dronepath-logo.png", "scanair_dji_importer/assets"),
+    ("scanair_dji_importer/assets/dronepath-logo.ico", "scanair_dji_importer/assets"),
 ]
 
 a = Analysis(
     ["scanair_dji_importer/__main__.py"],
     pathex=[],
     binaries=[],
-    datas=app_datas,
-    hiddenimports=[],
+    datas=tkinterdnd2_datas + app_datas,
+    hiddenimports=["tkinterdnd2"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -34,7 +39,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -43,4 +48,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="scanair_dji_importer/assets/dronepath-logo.ico",
 )

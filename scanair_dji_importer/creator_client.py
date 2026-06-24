@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
-from email.message import Message
+from io import BytesIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+from zipfile import BadZipFile, ZipFile
 
 
 DEFAULT_CREATOR_API_URL = "https://api.scanair.ca"
 
 
 class CreatorApiError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,7 @@ class CreatorPath:
     updated_at: str
     has_mission_area: bool
     has_saved_mission: bool
+    export_part_count: int = 1
 
 
 @dataclass(frozen=True)
@@ -55,93 +58,117 @@ class WebsiteAuthPoll:
 
 
 class CreatorClient:
-    def __init__(self, base_url: str = DEFAULT_CREATOR_API_URL, access_token: str = "") -> None:
+    def __init__(
+        self,
+        base_url: str = DEFAULT_CREATOR_API_URL,
+        access_token: str = "",
+    ) -> None:
         self.base_url = base_url.rstrip("/") or DEFAULT_CREATOR_API_URL
         self.access_token = access_token.strip()
 
     def list_projects(self) -> list[CreatorProject]:
-        rows = self._json("GET", "/projects")
-        if not isinstance(rows, list):
+        project_rows = self._json("GET", "/projects")
+        if not isinstance(project_rows, list):
             raise CreatorApiError("Creator backend returned an unexpected project list.")
-        return [self._project_from_row(row) for row in rows if isinstance(row, dict)]
+
+        projects: list[CreatorProject] = []
+        for row in project_rows:
+            if not isinstance(row, dict):
+                continue
+            project_id = str(row.get("project_id") or "")
+            if not project_id:
+                continue
+            path_rows = self._json("GET", f"/projects/{quote(project_id, safe='')}/paths")
+            if not isinstance(path_rows, list):
+                raise CreatorApiError("Creator backend returned an unexpected path list.")
+            paths = [self._path_from_row(project_id, path) for path in path_rows if isinstance(path, dict)]
+            projects.append(
+                CreatorProject(
+                    project_id=project_id,
+                    name=str(row.get("name") or project_id),
+                    updated_at=str(row.get("updated_at") or ""),
+                    paths=paths,
+                )
+            )
+        return projects
 
     def download_path_kmz(
         self,
         project_id: str,
         path_id: str,
-        *,
-        auto_record_video: bool = True,
-        record_grid_passes: bool = False,
-        ignore_waypoint_limit: bool = False,
     ) -> CreatorDownload:
+        return self.download_path_kmz_files(project_id, path_id)[0]
+
+    def download_path_kmz_files(
+        self,
+        project_id: str,
+        path_id: str,
+    ) -> list[CreatorDownload]:
         query = urlencode(
             {
-                "auto_record_video": str(auto_record_video).lower(),
-                "record_grid_passes": str(record_grid_passes).lower(),
-                "ignore_waypoint_limit": str(ignore_waypoint_limit).lower(),
+                "auto_record_video": "true",
+                "record_grid_passes": "false",
+                "take_photo_each_waypoint": "false",
+                "split_waypoint_files": "true",
             }
         )
-        path = f"/projects/{quote(project_id, safe='')}/paths/{quote(path_id, safe='')}/exports/kmz?{query}"
-        payload, headers = self._bytes("POST", path)
-        filename = filename_from_headers(headers) or "scanair-mission.kmz"
-        if not filename.lower().endswith(".kmz"):
-            filename = f"{filename}.kmz"
-        return CreatorDownload(filename=filename, payload=payload)
-
-    def _project_from_row(self, row: dict) -> CreatorProject:
-        project_id = str(row.get("project_id") or row.get("projectId") or "")
-        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-        paths = []
-        for path in payload.get("paths") or []:
-            if not isinstance(path, dict):
-                continue
-            path_id = str(path.get("id") or "")
-            if not project_id or not path_id:
-                continue
-            settings = path.get("settings") if isinstance(path.get("settings"), dict) else {}
-            mission_area = path.get("orbitArea") if settings.get("scanType") == "orbit" else path.get("polygon")
-            mission = path.get("mission") if isinstance(path.get("mission"), dict) else {}
-            paths.append(
-                CreatorPath(
-                    project_id=project_id,
-                    path_id=path_id,
-                    name=str(path.get("name") or path_id),
-                    updated_at=str(path.get("updatedAt") or ""),
-                    has_mission_area=mission_area is not None,
-                    has_saved_mission=bool(mission.get("waypoints")),
-                )
-            )
-        return CreatorProject(
-            project_id=project_id,
-            name=str(row.get("name") or payload.get("name") or project_id),
-            updated_at=str(row.get("updated_at") or row.get("updatedAt") or ""),
-            paths=paths,
+        path = (
+            f"/projects/{quote(project_id, safe='')}/paths/{quote(path_id, safe='')}"
+            f"/exports/kmz?{query}"
         )
-
-    def _headers(self) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
-        return headers
-
-    def _json(self, method: str, path: str) -> object:
-        payload, _headers = self._request(method, path, expect_json=True)
-        return json.loads(payload.decode("utf-8"))
-
-    def _bytes(self, method: str, path: str) -> tuple[bytes, Message]:
-        return self._request(method, path, expect_json=False)
-
-    def _request(self, method: str, path: str, *, expect_json: bool) -> tuple[bytes, Message]:
-        headers = self._headers()
-        if expect_json:
-            headers["Accept"] = "application/json"
-        request = Request(f"{self.base_url}{path}", headers=headers, method=method)
+        request = Request(f"{self.base_url}{path}", headers=self._auth_headers(), method="POST")
         try:
-            with urlopen(request, timeout=60) as response:
-                return response.read(), response.headers
+            with urlopen(request, timeout=120) as response:
+                payload = response.read()
+                filename = _download_filename(response.headers.get("Content-Disposition", ""))
+                content_type = response.headers.get("Content-Type", "")
         except HTTPError as exc:
             detail = _error_detail(exc)
-            raise CreatorApiError(detail or f"Creator backend returned HTTP {exc.code}.") from exc
+            raise CreatorApiError(
+                detail or f"Creator backend returned HTTP {exc.code}.",
+                status_code=exc.code,
+            ) from exc
+        except URLError as exc:
+            raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
+        if _is_zip_response(filename, content_type):
+            return _downloads_from_zip(payload)
+        filename = filename or "scanair-mission.kmz"
+        if not filename.lower().endswith(".kmz"):
+            filename = f"{filename}.kmz"
+        return [CreatorDownload(filename=filename, payload=payload)]
+
+    def _path_from_row(self, project_id: str, row: dict) -> CreatorPath:
+        return CreatorPath(
+            project_id=project_id,
+            path_id=str(row.get("path_id") or ""),
+            name=str(row.get("name") or row.get("path_id") or "Path"),
+            updated_at=str(row.get("updated_at") or ""),
+            has_mission_area=bool(row.get("has_mission_area")),
+            has_saved_mission=bool(row.get("has_saved_mission")),
+            export_part_count=_positive_int(row.get("export_part_count"), 1),
+        )
+
+    def _auth_headers(self) -> dict[str, str]:
+        if not self.access_token:
+            raise CreatorApiError("Authorize with the ScanAir website before loading cloud paths.")
+        return {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.access_token}",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+
+    def _json(self, method: str, path: str) -> object:
+        request = Request(f"{self.base_url}{path}", headers=self._auth_headers(), method=method)
+        try:
+            with urlopen(request, timeout=60) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = _error_detail(exc)
+            raise CreatorApiError(
+                detail or f"Creator backend returned HTTP {exc.code}.",
+                status_code=exc.code,
+            ) from exc
         except URLError as exc:
             raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
 
@@ -170,18 +197,15 @@ class WebsiteAuthClient:
                 body = json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
             detail = _error_detail(exc)
-            raise CreatorApiError(detail or f"Website auth failed with HTTP {exc.code}.") from exc
+            raise CreatorApiError(
+                detail or f"Website auth failed with HTTP {exc.code}.",
+                status_code=exc.code,
+            ) from exc
         except URLError as exc:
             raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
         if not isinstance(body, dict):
             raise CreatorApiError("Creator backend returned an unexpected auth response.")
         return body
-
-
-def filename_from_headers(headers: Message) -> str | None:
-    disposition = headers.get("Content-Disposition", "")
-    match = re.search(r'filename="?([^";]+)"?', disposition, flags=re.IGNORECASE)
-    return match.group(1) if match else None
 
 
 def _error_detail(exc: HTTPError) -> str:
@@ -197,3 +221,38 @@ def _error_detail(exc: HTTPError) -> str:
         return body
     detail = data.get("detail") if isinstance(data, dict) else None
     return str(detail) if detail else body
+
+
+def _download_filename(disposition: str) -> str:
+    for part in disposition.split(";"):
+        part = part.strip()
+        if part.lower().startswith("filename="):
+            return part.split("=", 1)[1].strip().strip('"')
+    return ""
+
+
+def _is_zip_response(filename: str, content_type: str) -> bool:
+    return filename.lower().endswith(".zip") or "zip" in content_type.lower()
+
+
+def _downloads_from_zip(payload: bytes) -> list[CreatorDownload]:
+    try:
+        with ZipFile(BytesIO(payload)) as archive:
+            downloads = [
+                CreatorDownload(filename=name.split("/")[-1], payload=archive.read(name))
+                for name in archive.namelist()
+                if not name.endswith("/") and name.lower().endswith(".kmz")
+            ]
+    except BadZipFile as exc:
+        raise CreatorApiError("Creator backend returned a split export ZIP that could not be read.") from exc
+    if not downloads:
+        raise CreatorApiError("Creator backend returned a split export ZIP without KMZ files.")
+    return downloads
+
+
+def _positive_int(value: object, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return max(1, parsed)
