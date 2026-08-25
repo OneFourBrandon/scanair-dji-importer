@@ -10,3 +10,5 @@ build/
 data/
 .test-tmp/
 .build-tmp/
+.agents/
+.codex/
