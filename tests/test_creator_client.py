@@ -3,10 +3,15 @@ import threading
 import unittest
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 from urllib.parse import urlparse
 from zipfile import ZipFile
 
-from scanair_dji_importer.creator_client import CreatorApiError, CreatorClient
+from scanair_dji_importer.creator_client import (
+    CreatorApiError,
+    CreatorClient,
+    WebsiteAuthClient,
+)
 
 
 class CreatorClientTests(unittest.TestCase):
@@ -68,6 +73,40 @@ class CreatorClientTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_revoke_desktop_session(self) -> None:
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            client = CreatorClient(f"http://127.0.0.1:{server.server_port}", "token")
+
+            client.revoke_session()
+
+            self.assertTrue(server.session_revoked)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_malformed_json_becomes_creator_api_error(self) -> None:
+        response = _FakeResponse(b"{not-json")
+        with patch("scanair_dji_importer.creator_client.urlopen", return_value=response):
+            with self.assertRaisesRegex(CreatorApiError, "malformed JSON"):
+                CreatorClient("https://api.example", "token").list_projects()
+
+    def test_timeout_becomes_creator_api_error(self) -> None:
+        with patch(
+            "scanair_dji_importer.creator_client.urlopen",
+            side_effect=TimeoutError("timed out"),
+        ):
+            with self.assertRaisesRegex(CreatorApiError, "Could not reach Creator backend"):
+                WebsiteAuthClient("https://api.example").start()
+
+    def test_invalid_auth_numbers_become_creator_api_error(self) -> None:
+        response = _FakeResponse(b'{"code":"abc","expires_in":"not-a-number"}')
+        with patch("scanair_dji_importer.creator_client.urlopen", return_value=response):
+            with self.assertRaisesRegex(CreatorApiError, "invalid authorization session"):
+                WebsiteAuthClient("https://api.example").start()
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -133,6 +172,16 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"kmz-data")
 
+    def do_DELETE(self) -> None:
+        if not self.assert_auth():
+            return
+        if urlparse(self.path).path != "/desktop-auth/session":
+            self.send_error(404)
+            return
+        self.server.session_revoked = True
+        self.send_response(204)
+        self.end_headers()
+
     def assert_auth(self) -> bool:
         if self.headers.get("Authorization") != "Bearer token":
             self.send_error(401)
@@ -149,6 +198,20 @@ def _split_zip_payload() -> bytes:
         archive.writestr("part-01.kmz", b"kmz-one")
         archive.writestr("part-02.kmz", b"kmz-two")
     return buffer.getvalue()
+
+
+class _FakeResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
 
 
 if __name__ == "__main__":

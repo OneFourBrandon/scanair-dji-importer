@@ -77,7 +77,12 @@ class ScanAirImporterApp(TkRoot):
         creator_settings = self.store.get_creator_settings()
 
         self.project_var = tk.StringVar(value="No cloud project selected")
-        self.status_var = tk.StringVar(value="Authorize with ScanAir to load cloud paths.")
+        initial_status = (
+            f"Saved authorization could not be unlocked. Re-authorize with ScanAir. {self.store.credential_error}"
+            if self.store.credential_error
+            else "Authorize with ScanAir to load cloud paths."
+        )
+        self.status_var = tk.StringVar(value=initial_status)
         self.creator_login_var = tk.StringVar(
             value=f"Authorized as {creator_settings['email']}" if creator_settings["access_token"] else "Not authorized"
         )
@@ -654,6 +659,8 @@ class ScanAirImporterApp(TkRoot):
             except CreatorApiError as exc:
                 error_message = str(exc)
                 self.after(0, partial(self.set_creator_status, error_message))
+            except Exception as exc:
+                self.after(0, partial(self.set_creator_status, f"Website authorization failed: {exc}"))
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -665,6 +672,9 @@ class ScanAirImporterApp(TkRoot):
         self.refresh_creator_projects_async()
 
     def sign_out_creator(self) -> None:
+        settings = self.store.get_creator_settings()
+        token = settings["access_token"]
+        base_url = settings["base_url"]
         self.store.clear_creator_session()
         if self.creator_login_var is not None:
             self.creator_login_var.set("Not authorized")
@@ -676,6 +686,20 @@ class ScanAirImporterApp(TkRoot):
         self.creator_path_rows = {}
         self.project_var.set("No cloud project selected")
         self.set_creator_status("Signed out of Creator.")
+        if token.startswith("sdi_"):
+            def revoke_runner() -> None:
+                try:
+                    CreatorClient(base_url, token).revoke_session()
+                except Exception as exc:
+                    self.after(
+                        0,
+                        partial(
+                            self.set_creator_status,
+                            f"Signed out locally. The server session could not be revoked: {exc}",
+                        ),
+                    )
+
+            threading.Thread(target=revoke_runner, daemon=True).start()
 
     def refresh_creator_projects_async(self) -> None:
         if not self.store.get_creator_settings()["access_token"]:
@@ -695,6 +719,9 @@ class ScanAirImporterApp(TkRoot):
                     self.after(0, partial(self.show_auth_expired_popup, error_message))
                 else:
                     self.after(0, partial(self.set_creator_status, error_message))
+                return
+            except Exception as exc:
+                self.after(0, partial(self.set_creator_status, f"Could not load cloud projects: {exc}"))
                 return
             self.after(0, partial(self.apply_creator_projects, loaded_projects, selected_project_id))
 

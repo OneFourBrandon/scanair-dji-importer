@@ -9,6 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
+from .credential_protection import (
+    CredentialProtectionError,
+    protect_secret,
+    unprotect_secret,
+)
+
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / "ScanAirDJIImporter"
 PROJECTS_DIR = APP_DIR / "projects"
@@ -60,6 +66,8 @@ class ProjectStore:
         self.root = root
         self.projects_dir = root / "projects"
         self.state_path = root / "state.json"
+        self._volatile_access_token = ""
+        self.credential_error = ""
         self.root.mkdir(parents=True, exist_ok=True)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         if not self.state_path.exists():
@@ -86,12 +94,38 @@ class ProjectStore:
             and stored_website_url.rstrip("/") in LEGACY_DEFAULT_CREATOR_WEBSITE_URLS
         ):
             stored_website_url = ""
+        access_token = self._volatile_access_token
+        encrypted_token = str(settings.get("encrypted_access_token") or "")
+        plaintext_token = str(settings.get("access_token") or "")
+        if not access_token and encrypted_token:
+            try:
+                access_token = unprotect_secret(encrypted_token)
+                self.credential_error = ""
+            except CredentialProtectionError as exc:
+                self.credential_error = str(exc)
+                settings.pop("encrypted_access_token", None)
+                settings.pop("access_token", None)
+                settings.pop("refresh_token", None)
+                state["creator"] = settings
+                self._write_state(state)
+        elif not access_token and plaintext_token:
+            access_token = plaintext_token
+            try:
+                settings["encrypted_access_token"] = protect_secret(plaintext_token)
+                self.credential_error = ""
+            except CredentialProtectionError as exc:
+                self._volatile_access_token = plaintext_token
+                self.credential_error = str(exc)
+            settings.pop("access_token", None)
+            settings.pop("refresh_token", None)
+            state["creator"] = settings
+            self._write_state(state)
         return {
             "base_url": stored_base_url or DEFAULT_CREATOR_API_URL,
             "website_url": stored_website_url or DEFAULT_CREATOR_WEBSITE_URL,
             "email": str(settings.get("email") or ""),
-            "access_token": str(settings.get("access_token") or ""),
-            "refresh_token": str(settings.get("refresh_token") or ""),
+            "access_token": access_token,
+            "refresh_token": "",
         }
 
     def set_creator_settings(
@@ -105,21 +139,32 @@ class ProjectStore:
     ) -> None:
         state = self._read_state()
         previous = state.get("creator") if isinstance(state.get("creator"), dict) else {}
-        state["creator"] = {
+        next_settings = {
             "base_url": base_url.strip() or DEFAULT_CREATOR_API_URL,
             "website_url": website_url.strip() or str(previous.get("website_url") or DEFAULT_CREATOR_WEBSITE_URL),
             "email": email.strip() or str(previous.get("email") or ""),
-            "access_token": access_token.strip(),
-            "refresh_token": refresh_token.strip() or str(previous.get("refresh_token") or ""),
         }
+        token = access_token.strip()
+        self._volatile_access_token = ""
+        if token:
+            try:
+                next_settings["encrypted_access_token"] = protect_secret(token)
+                self.credential_error = ""
+            except CredentialProtectionError as exc:
+                self._volatile_access_token = token
+                self.credential_error = str(exc)
+        state["creator"] = next_settings
         state["updated_at"] = utc_now()
         self._write_state(state)
 
     def clear_creator_session(self) -> None:
         state = self._read_state()
         settings = state.get("creator") if isinstance(state.get("creator"), dict) else {}
-        settings["access_token"] = ""
-        settings["refresh_token"] = ""
+        settings.pop("access_token", None)
+        settings.pop("encrypted_access_token", None)
+        settings.pop("refresh_token", None)
+        self._volatile_access_token = ""
+        self.credential_error = ""
         state["creator"] = settings
         state["updated_at"] = utc_now()
         self._write_state(state)

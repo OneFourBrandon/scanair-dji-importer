@@ -55,6 +55,8 @@ class WebsiteAuthPoll:
     access_token: str
     email: str
     expires_in: int
+    token_type: str
+    session_expires_in: int
 
 
 class CreatorClient:
@@ -130,6 +132,8 @@ class CreatorClient:
             ) from exc
         except URLError as exc:
             raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc}") from exc
         if _is_zip_response(filename, content_type):
             return _downloads_from_zip(payload)
         filename = filename or "scanair-mission.kmz"
@@ -171,6 +175,30 @@ class CreatorClient:
             ) from exc
         except URLError as exc:
             raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CreatorApiError("Creator backend returned malformed JSON.") from exc
+
+    def revoke_session(self) -> None:
+        request = Request(
+            f"{self.base_url}/desktop-auth/session",
+            headers=self._auth_headers(),
+            method="DELETE",
+        )
+        try:
+            with urlopen(request, timeout=30):
+                return
+        except HTTPError as exc:
+            detail = _error_detail(exc)
+            raise CreatorApiError(
+                detail or f"Creator backend returned HTTP {exc.code}.",
+                status_code=exc.code,
+            ) from exc
+        except URLError as exc:
+            raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc}") from exc
 
 
 class WebsiteAuthClient:
@@ -179,16 +207,24 @@ class WebsiteAuthClient:
 
     def start(self) -> WebsiteAuthStart:
         data = self._json("POST", "/desktop-auth/sessions")
-        return WebsiteAuthStart(code=str(data.get("code") or ""), expires_in=int(data.get("expires_in") or 0))
+        try:
+            return WebsiteAuthStart(code=str(data.get("code") or ""), expires_in=int(data.get("expires_in") or 0))
+        except (TypeError, ValueError) as exc:
+            raise CreatorApiError("Creator backend returned an invalid authorization session.") from exc
 
     def poll(self, code: str) -> WebsiteAuthPoll:
         data = self._json("GET", f"/desktop-auth/sessions/{quote(code, safe='')}")
-        return WebsiteAuthPoll(
-            status=str(data.get("status") or "pending"),
-            access_token=str(data.get("access_token") or ""),
-            email=str(data.get("email") or ""),
-            expires_in=int(data.get("expires_in") or 0),
-        )
+        try:
+            return WebsiteAuthPoll(
+                status=str(data.get("status") or "pending"),
+                access_token=str(data.get("access_token") or ""),
+                email=str(data.get("email") or ""),
+                expires_in=int(data.get("expires_in") or 0),
+                token_type=str(data.get("token_type") or "legacy"),
+                session_expires_in=int(data.get("session_expires_in") or 0),
+            )
+        except (TypeError, ValueError) as exc:
+            raise CreatorApiError("Creator backend returned an invalid authorization response.") from exc
 
     def _json(self, method: str, path: str) -> dict:
         request = Request(f"{self.base_url}{path}", headers={"Accept": "application/json"}, method=method)
@@ -203,6 +239,10 @@ class WebsiteAuthClient:
             ) from exc
         except URLError as exc:
             raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc.reason}") from exc
+        except (TimeoutError, OSError) as exc:
+            raise CreatorApiError(f"Could not reach Creator backend at {self.base_url}: {exc}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise CreatorApiError("Creator backend returned malformed JSON.") from exc
         if not isinstance(body, dict):
             raise CreatorApiError("Creator backend returned an unexpected auth response.")
         return body

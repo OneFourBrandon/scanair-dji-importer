@@ -2,7 +2,13 @@ import unittest
 import shutil
 import json
 from pathlib import Path
+from unittest.mock import patch
 
+from scanair_dji_importer.credential_protection import (
+    CredentialProtectionError,
+    protect_secret,
+    unprotect_secret,
+)
 from scanair_dji_importer.store import ProjectStore, sanitize_filename
 
 
@@ -122,6 +128,81 @@ class ProjectStoreTests(unittest.TestCase):
             (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
 
             self.assertEqual(store.get_creator_settings()["website_url"], "https://path.scanair.ca")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_dpapi_round_trip(self) -> None:
+        encrypted = protect_secret("sdi_test-token")
+
+        self.assertTrue(encrypted.startswith("dpapi:v1:"))
+        self.assertNotIn("sdi_test-token", encrypted)
+        self.assertEqual(unprotect_secret(encrypted), "sdi_test-token")
+
+    def test_migrates_plaintext_creator_token_to_dpapi(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-token-migration"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+            state["creator"] = {
+                "base_url": "https://api.scanair.ca",
+                "access_token": "legacy-plaintext-token",
+                "refresh_token": "legacy-refresh-token",
+            }
+            (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+            settings = store.get_creator_settings()
+            persisted = json.loads((root / "state.json").read_text(encoding="utf-8"))["creator"]
+
+            self.assertEqual(settings["access_token"], "legacy-plaintext-token")
+            self.assertNotIn("access_token", persisted)
+            self.assertNotIn("refresh_token", persisted)
+            self.assertEqual(
+                unprotect_secret(persisted["encrypted_access_token"]),
+                "legacy-plaintext-token",
+            )
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_corrupt_encrypted_token_fails_closed(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-corrupt-token"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            state = json.loads((root / "state.json").read_text(encoding="utf-8"))
+            state["creator"] = {"encrypted_access_token": "dpapi:v1:not-base64!"}
+            (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+            settings = store.get_creator_settings()
+            persisted = json.loads((root / "state.json").read_text(encoding="utf-8"))["creator"]
+
+            self.assertEqual(settings["access_token"], "")
+            self.assertNotIn("encrypted_access_token", persisted)
+            self.assertIn("corrupted", store.credential_error.lower())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_dpapi_failure_never_persists_plaintext_token(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-dpapi-failure"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            with patch(
+                "scanair_dji_importer.store.protect_secret",
+                side_effect=CredentialProtectionError("DPAPI unavailable"),
+            ):
+                store.set_creator_settings(
+                    base_url="https://api.scanair.ca",
+                    access_token="sdi_memory-only",
+                )
+
+            raw_state = (root / "state.json").read_text(encoding="utf-8")
+            self.assertNotIn("sdi_memory-only", raw_state)
+            self.assertEqual(store.get_creator_settings()["access_token"], "sdi_memory-only")
+            self.assertIn("DPAPI unavailable", store.credential_error)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

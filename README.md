@@ -8,8 +8,8 @@ This app bridges a real SaaS workflow, a cloud mission-planning backend, DJI's K
 
 ## Current Features
 
-- Website authorization through `https://path.scanair.ca` using a one-time desktop auth session.
-- Cloud project and path loading from ScanAir's backend using the authorized user's account token.
+- Website authorization through `https://path.scanair.ca` using a one-time browser handoff.
+- Cloud project and path loading with a scoped 30-day importer session.
 - On-demand DJI KMZ generation through the Creator API, using the same backend mission validation and KMZ packaging path as normal Creator exports.
 - Multi-path selection with manual sync ordering, so the user controls which cloud path replaces each dummy slot.
 - DJI RC 2 detection through Windows MTP / This PC.
@@ -84,7 +84,7 @@ $env:SCANAIR_CREATOR_WEBSITE_URL = "http://localhost:5173"
 python -m scanair_dji_importer
 ```
 
-The app saves the backend URL, website URL, account email, and resulting session locally in its app state.
+The app saves the backend URL and account email in its local app state. Its scoped session token is encrypted with Windows DPAPI for the current Windows user before it is persisted. Existing plaintext credentials are migrated on first launch, while copied or corrupt credentials fail closed and require website authorization again.
 
 Developer mode is available from the top menu. When enabled, the importer searches for a local Drone Path Creator instance and updates its Creator URLs when it finds one. It probes common development ports:
 
