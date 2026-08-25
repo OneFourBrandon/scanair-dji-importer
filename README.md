@@ -24,7 +24,7 @@ Generated KMZ files are synced to:
 DJI RC 2\Internal shared storage\Android\data\dji.go.v5\files\waypoint
 ```
 
-## Engineering Highlights
+## Project Highlights
 
 - **Desktop to web authorization:** Implements a one-time browser approval flow so the desktop app can authenticate through the SaaS web app without asking the user to paste tokens.
 - **Cloud backend integration:** Reads per-user cloud projects through the Creator API, then asks the backend to generate current KMZ files for selected paths at sync time. The importer does not read KMZ files directly from Supabase.
