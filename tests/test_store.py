@@ -131,6 +131,25 @@ class ProjectStoreTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_explicit_local_creator_pair_is_not_replaced_by_production(self) -> None:
+        root = Path.cwd() / ".test-tmp" / "store-local-creator-settings"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            store = ProjectStore(root)
+            store.set_creator_settings(
+                base_url="http://localhost:8000",
+                website_url="http://localhost:5173",
+                access_token="",
+            )
+
+            settings = store.get_creator_settings()
+
+            self.assertEqual(settings["base_url"], "http://localhost:8000")
+            self.assertEqual(settings["website_url"], "http://localhost:5173")
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_dpapi_round_trip(self) -> None:
         encrypted = protect_secret("sdi_test-token")
 

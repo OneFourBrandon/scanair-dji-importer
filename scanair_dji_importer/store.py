@@ -87,7 +87,12 @@ class ProjectStore:
         settings = state.get("creator") if isinstance(state.get("creator"), dict) else {}
         stored_base_url = str(settings.get("base_url") or "")
         stored_website_url = str(settings.get("website_url") or "")
-        if "SCANAIR_CREATOR_API_URL" not in os.environ and stored_base_url in LEGACY_DEFAULT_CREATOR_API_URLS:
+        should_migrate_legacy_local_api = (
+            "SCANAIR_CREATOR_API_URL" not in os.environ
+            and stored_base_url in LEGACY_DEFAULT_CREATOR_API_URLS
+            and stored_website_url.rstrip("/") in {"", *LEGACY_DEFAULT_CREATOR_WEBSITE_URLS}
+        )
+        if should_migrate_legacy_local_api:
             stored_base_url = ""
         if (
             "SCANAIR_CREATOR_WEBSITE_URL" not in os.environ
