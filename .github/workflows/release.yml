@@ -1,0 +1,59 @@
+name: Release Windows importer
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Verify tag matches package version
+        shell: pwsh
+        run: |
+          $tagVersion = "${{ github.ref_name }}" -replace '^v', ''
+          $pyproject = Get-Content pyproject.toml -Raw
+          $versionMatch = [regex]::Match($pyproject, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $versionMatch.Success) {
+            throw "Could not read the package version from pyproject.toml."
+          }
+          $packageVersion = $versionMatch.Groups[1].Value
+          if ($tagVersion -ne $packageVersion) {
+            throw "Tag version $tagVersion does not match package version $packageVersion."
+          }
+
+      - name: Install build dependencies
+        run: python -m pip install -e ".[build]"
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: .\build_exe.ps1
+
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\ScanAirDJIImporter.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  ScanAirDJIImporter.exe" | Set-Content dist\ScanAirDJIImporter.exe.sha256
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: false
+          files: |
+            dist/ScanAirDJIImporter.exe
+            dist/ScanAirDJIImporter.exe.sha256

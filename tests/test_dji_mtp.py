@@ -268,6 +268,61 @@ class DjiMtpTests(unittest.TestCase):
             dji_mtp.CONTROLLER_MAPPINGS_PATH = original_path
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_verify_dummy_slots_recovers_saved_mapping_when_windows_hwid_is_unavailable(self) -> None:
+        import scanair_dji_importer.dji_mtp as dji_mtp
+
+        original_identity = dji_mtp.get_controller_identity
+        original_inspect = dji_mtp.inspect_device_packages
+        original_path = dji_mtp.CONTROLLER_MAPPINGS_PATH
+        root = Path.cwd() / ".test-tmp" / "dji-fallback-identity"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        dji_mtp.CONTROLLER_MAPPINGS_PATH = root / "mappings.json"
+        slots = [
+            DummySlot(
+                slot_name=str(index),
+                package_name=f"id-{index}",
+                kmz_name=f"id-{index}.kmz",
+                has_image_folder=True,
+            )
+            for index in range(1, 11)
+        ]
+        hardware_identity = ControllerIdentity(
+            key="controller-hardware-key",
+            label="DJI RC 2 (hardware ID)",
+            raw_id="USB\\DJI-HARDWARE-ID",
+            source="windows-hwid",
+        )
+        save_controller_mapping(hardware_identity.key, slots, hardware_identity)
+        dji_mtp.get_controller_identity = lambda: ControllerIdentity(
+            key="controller-mtp-fallback",
+            label="DJI RC 2 (mtp-name fallback)",
+            raw_id="MTP:DJI RC 2",
+            source="mtp-name",
+        )
+        dji_mtp.inspect_device_packages = lambda: [
+            DeviceFile(
+                name=f"id-{index}.kmz",
+                package_name=f"id-{index}",
+                has_image_folder=True,
+                is_calibration=False,
+                waypoint_signature=f"modified-{index}",
+            )
+            for index in range(1, 11)
+        ]
+        try:
+            verification = verify_dummy_slots()
+
+            self.assertTrue(verification.ok)
+            self.assertEqual(verification.source, "saved")
+            self.assertEqual(verification.controller_key, hardware_identity.key)
+            self.assertEqual([slot.package_name for slot in verification.slots], [f"id-{index}" for index in range(1, 11)])
+        finally:
+            dji_mtp.get_controller_identity = original_identity
+            dji_mtp.inspect_device_packages = original_inspect
+            dji_mtp.CONTROLLER_MAPPINGS_PATH = original_path
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_update_controller_slot_mapping_renumbers_reordered_slots_and_keeps_local_names(self) -> None:
         import scanair_dji_importer.dji_mtp as dji_mtp
 

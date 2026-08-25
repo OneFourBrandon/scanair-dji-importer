@@ -618,9 +618,13 @@ def list_device_files() -> list[DeviceFile]:
 
 def verify_dummy_slots(controller_key: str | None = None) -> DummySlotVerification:
     identity = get_controller_identity() if controller_key is None else None
-    mapping_key = controller_key or identity.key
-    controller_label = identity.label if identity else mapping_key
     files = inspect_device_packages()
+    if controller_key is not None:
+        mapping_key = controller_key
+    else:
+        assert identity is not None
+        mapping_key = resolve_controller_mapping_key(identity, files)
+    controller_label = identity.label if identity else mapping_key
     saved = load_controller_mapping(mapping_key)
     if saved:
         by_package = {file.package_name: file for file in files if file.package_name}
@@ -730,6 +734,43 @@ def load_controller_mapping(controller_key: str) -> list[dict]:
     return slots if isinstance(slots, list) else []
 
 
+def resolve_controller_mapping_key(identity: ControllerIdentity, files: list[DeviceFile]) -> str:
+    """Resolve a saved controller by its stable DJI package IDs when Windows hides its HWID."""
+    data = read_controller_mappings()
+    current_files = {
+        (file.package_name, file.name)
+        for file in files
+        if file.package_name and file.name
+    }
+
+    candidates: list[tuple[int, bool, str]] = []
+    for key, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        slots = entry.get("slots")
+        if not isinstance(slots, list):
+            continue
+        overlap = sum(
+            (str(slot.get("package_name") or ""), str(slot.get("kmz_name") or "")) in current_files
+            for slot in slots
+            if isinstance(slot, dict)
+        )
+        if overlap:
+            raw_id_matches = str(entry.get("controller_raw_id") or "") == identity.raw_id
+            candidates.append((overlap, raw_id_matches, key))
+
+    if candidates:
+        candidates.sort(reverse=True)
+        best_overlap, best_raw_id_match, best_key = candidates[0]
+        tied = [candidate for candidate in candidates if candidate[:2] == (best_overlap, best_raw_id_match)]
+        if len(tied) == 1:
+            return best_key
+
+    if identity.source != "mtp-name" and identity.key in data:
+        return identity.key
+    return identity.key
+
+
 def clear_controller_mapping(controller_key: str) -> bool:
     data = read_controller_mappings()
     if controller_key not in data:
@@ -741,7 +782,9 @@ def clear_controller_mapping(controller_key: str) -> bool:
 
 def get_controller_slot_mapping() -> tuple[ControllerIdentity, list[dict]]:
     identity = get_controller_identity()
-    return identity, load_controller_mapping(identity.key)
+    files = inspect_device_packages()
+    mapping_key = resolve_controller_mapping_key(identity, files)
+    return identity, load_controller_mapping(mapping_key)
 
 
 def update_controller_slot_mapping(slots: list[dict]) -> ControllerIdentity:
@@ -764,9 +807,19 @@ def update_controller_slot_mapping(slots: list[dict]) -> ControllerIdentity:
                 "modified_at": str(slot.get("modified_at") or "").strip(),
             }
         )
+    slot_files = [
+        DeviceFile(
+            name=slot["kmz_name"],
+            package_name=slot["package_name"],
+            has_image_folder=False,
+            is_calibration=False,
+        )
+        for slot in normalized_slots
+    ]
+    mapping_key = resolve_controller_mapping_key(identity, slot_files)
     data = read_controller_mappings()
-    existing = data.get(identity.key, {})
-    data[identity.key] = {
+    existing = data.get(mapping_key, {})
+    data[mapping_key] = {
         **existing,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "controller_label": identity.label,
