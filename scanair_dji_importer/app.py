@@ -296,6 +296,21 @@ class ScanAirImporterApp(TkRoot):
         self.dev_drop_registered = True
 
     def on_dev_mode_changed(self) -> None:
+        self.store._volatile_access_token = ""
+        self.store.dev_mode = self.dev_mode_var.get()
+        settings = self.store.get_creator_settings()
+        if self.creator_base_url_var is not None:
+            self.creator_base_url_var.set(settings["base_url"])
+        if self.creator_website_url_var is not None:
+            self.creator_website_url_var.set(settings["website_url"])
+        self.creator_projects = []
+        self.creator_path_rows = {}
+        self.project_var.set("No cloud project selected")
+        if self.creator_project_list is not None:
+            self.creator_project_list.delete(0, tk.END)
+        if self.creator_path_tree is not None:
+            self.creator_path_tree.delete(*self.creator_path_tree.get_children())
+        self.creator_login_var.set(f"Authorized as {settings['email']}" if settings["access_token"] else "Not authorized")
         if self.dev_mode_var.get():
             if DND_AVAILABLE:
                 self.drop_label.configure(text="Dev mode: searching for local Creator. Drop one KMZ file here to sync directly to slot 1.")
@@ -309,6 +324,9 @@ class ScanAirImporterApp(TkRoot):
             self.set_status("Dev mode disabled.")
 
     def detect_local_creator_async(self) -> None:
+        if not self.dev_mode_var.get():
+            self.set_status("Enable Dev Mode to connect to a local Creator instance.")
+            return
         self.set_status("Searching localhost for ScanAir Creator...")
 
         def runner() -> None:
@@ -319,6 +337,8 @@ class ScanAirImporterApp(TkRoot):
         threading.Thread(target=runner, daemon=True).start()
 
     def apply_local_creator_detection(self, backend_url: str, website_url: str) -> None:
+        if not self.dev_mode_var.get():
+            return
         if not backend_url and not website_url:
             self.set_status("No local ScanAir Creator instance found. Start backend on :8000 and frontend on :5173.")
             if self.dev_mode_var.get() and DND_AVAILABLE:
@@ -623,6 +643,7 @@ class ScanAirImporterApp(TkRoot):
         return CreatorClient(base_url, access_token)
 
     def authorize_creator_with_website(self) -> None:
+        auth_dev_mode = self.store.dev_mode
         settings = self.store.get_creator_settings()
         base_url = self.creator_base_url_var.get() if self.creator_base_url_var else settings["base_url"]
         website_url = self.creator_website_url_var.get() if self.creator_website_url_var else settings["website_url"]
@@ -646,6 +667,8 @@ class ScanAirImporterApp(TkRoot):
                 while time.monotonic() < deadline:
                     time.sleep(2)
                     polled = auth_client.poll(session.code)
+                    if self.store.dev_mode != auth_dev_mode:
+                        return
                     if polled.status == "authorized" and polled.access_token:
                         self.store.set_creator_settings(
                             base_url=base_url,

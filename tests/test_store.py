@@ -13,6 +13,26 @@ from scanair_dji_importer.store import ProjectStore, sanitize_filename
 
 
 class ProjectStoreTests(unittest.TestCase):
+    def test_production_ignores_saved_local_endpoints_after_restart(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = ProjectStore(Path(directory))
+            store._write_state({"creator": {
+                "base_url": "http://127.0.0.1:8080",
+                "website_url": "http://localhost:5174",
+                "access_token": "local-only-token",
+            }})
+            settings = store.get_creator_settings()
+            self.assertEqual(settings["base_url"], "https://api.scanair.ca")
+            self.assertEqual(settings["website_url"], "https://path.scanair.ca")
+            self.assertEqual(settings["access_token"], "")
+            store.dev_mode = True
+            store.set_creator_settings(base_url="http://localhost:8000", website_url="http://localhost:5173", access_token="")
+            self.assertEqual(store.get_creator_settings()["base_url"], "http://localhost:8000")
+            restarted = ProjectStore(Path(directory))
+            self.assertEqual(restarted.get_creator_settings()["base_url"], "https://api.scanair.ca")
+
     def test_project_lifecycle_and_active_files(self) -> None:
         root = Path.cwd() / ".test-tmp" / "store-lifecycle"
         shutil.rmtree(root, ignore_errors=True)
@@ -137,6 +157,7 @@ class ProjectStoreTests(unittest.TestCase):
         root.mkdir(parents=True)
         try:
             store = ProjectStore(root)
+            store.dev_mode = True
             store.set_creator_settings(
                 base_url="http://localhost:8000",
                 website_url="http://localhost:5173",

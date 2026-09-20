@@ -20,8 +20,8 @@ APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")
 PROJECTS_DIR = APP_DIR / "projects"
 STATE_PATH = APP_DIR / "state.json"
 CREATOR_CACHE_DIR = APP_DIR / "creator-cache"
-DEFAULT_CREATOR_API_URL = os.environ.get("SCANAIR_CREATOR_API_URL", "https://api.scanair.ca")
-DEFAULT_CREATOR_WEBSITE_URL = os.environ.get("SCANAIR_CREATOR_WEBSITE_URL", "https://path.scanair.ca")
+DEFAULT_CREATOR_API_URL = "https://api.scanair.ca"
+DEFAULT_CREATOR_WEBSITE_URL = "https://path.scanair.ca"
 LEGACY_DEFAULT_CREATOR_API_URLS = {"http://localhost:8000"}
 LEGACY_DEFAULT_CREATOR_WEBSITE_URLS = {"https://scanair.ca"}
 SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._ -]+")
@@ -68,6 +68,7 @@ class ProjectStore:
         self.state_path = root / "state.json"
         self._volatile_access_token = ""
         self.credential_error = ""
+        self.dev_mode = False
         self.root.mkdir(parents=True, exist_ok=True)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         if not self.state_path.exists():
@@ -84,7 +85,11 @@ class ProjectStore:
 
     def get_creator_settings(self) -> dict[str, str]:
         state = self._read_state()
-        settings = state.get("creator") if isinstance(state.get("creator"), dict) else {}
+        settings_key = "creator_dev" if self.dev_mode else "creator"
+        settings = state.get(settings_key) if isinstance(state.get(settings_key), dict) else {}
+        if not self.dev_mode and settings.get("base_url", DEFAULT_CREATOR_API_URL).rstrip("/") != DEFAULT_CREATOR_API_URL:
+            settings = {}
+            self._volatile_access_token = ""
         stored_base_url = str(settings.get("base_url") or "")
         stored_website_url = str(settings.get("website_url") or "")
         should_migrate_legacy_local_api = (
@@ -111,7 +116,7 @@ class ProjectStore:
                 settings.pop("encrypted_access_token", None)
                 settings.pop("access_token", None)
                 settings.pop("refresh_token", None)
-                state["creator"] = settings
+                state[settings_key] = settings
                 self._write_state(state)
         elif not access_token and plaintext_token:
             access_token = plaintext_token
@@ -123,11 +128,11 @@ class ProjectStore:
                 self.credential_error = str(exc)
             settings.pop("access_token", None)
             settings.pop("refresh_token", None)
-            state["creator"] = settings
+            state[settings_key] = settings
             self._write_state(state)
         return {
-            "base_url": stored_base_url or DEFAULT_CREATOR_API_URL,
-            "website_url": stored_website_url or DEFAULT_CREATOR_WEBSITE_URL,
+            "base_url": (stored_base_url or os.environ.get("SCANAIR_CREATOR_API_URL", DEFAULT_CREATOR_API_URL)) if self.dev_mode else DEFAULT_CREATOR_API_URL,
+            "website_url": (stored_website_url or os.environ.get("SCANAIR_CREATOR_WEBSITE_URL", DEFAULT_CREATOR_WEBSITE_URL)) if self.dev_mode else DEFAULT_CREATOR_WEBSITE_URL,
             "email": str(settings.get("email") or ""),
             "access_token": access_token,
             "refresh_token": "",
@@ -143,7 +148,11 @@ class ProjectStore:
         refresh_token: str = "",
     ) -> None:
         state = self._read_state()
-        previous = state.get("creator") if isinstance(state.get("creator"), dict) else {}
+        settings_key = "creator_dev" if self.dev_mode else "creator"
+        previous = state.get(settings_key) if isinstance(state.get(settings_key), dict) else {}
+        if not self.dev_mode:
+            base_url = DEFAULT_CREATOR_API_URL
+            website_url = DEFAULT_CREATOR_WEBSITE_URL
         next_settings = {
             "base_url": base_url.strip() or DEFAULT_CREATOR_API_URL,
             "website_url": website_url.strip() or str(previous.get("website_url") or DEFAULT_CREATOR_WEBSITE_URL),
@@ -158,19 +167,20 @@ class ProjectStore:
             except CredentialProtectionError as exc:
                 self._volatile_access_token = token
                 self.credential_error = str(exc)
-        state["creator"] = next_settings
+        state[settings_key] = next_settings
         state["updated_at"] = utc_now()
         self._write_state(state)
 
     def clear_creator_session(self) -> None:
         state = self._read_state()
-        settings = state.get("creator") if isinstance(state.get("creator"), dict) else {}
+        settings_key = "creator_dev" if self.dev_mode else "creator"
+        settings = state.get(settings_key) if isinstance(state.get(settings_key), dict) else {}
         settings.pop("access_token", None)
         settings.pop("encrypted_access_token", None)
         settings.pop("refresh_token", None)
         self._volatile_access_token = ""
         self.credential_error = ""
-        state["creator"] = settings
+        state[settings_key] = settings
         state["updated_at"] = utc_now()
         self._write_state(state)
 
